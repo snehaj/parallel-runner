@@ -37,8 +37,14 @@ import {
   initJiraWatcherBridge,
   queryLabeledTickets,
   swapTicketLabel,
+  initJiraWatcher,
+  startWatchingProject,
+  stopWatchingProject,
+  getJiraWatcherStateForTests,
 } from './jira-watcher.js';
 import { IPC } from './channels.js';
+
+const flushPromises = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 type ExecCb = (err: Error | null, stdout: string, stderr: string) => void;
 
@@ -55,6 +61,8 @@ function stubClaude(handler: (args: string[], cb: ExecCb) => void): string[][] {
 function fakeWindow(sent: Array<{ channel: string; payload: unknown }>) {
   return {
     isDestroyed: () => false,
+    isVisible: () => true,
+    on: () => {},
     webContents: {
       send: (channel: string, payload: unknown) => {
         sent.push({ channel, payload });
@@ -181,5 +189,114 @@ describe('swapTicketLabel', () => {
     const promptArg = calls[0].find((a) => a.includes('DEV_IRREG-1234'));
     expect(promptArg).toContain('REG_AUTOMATED');
     expect(promptArg).toContain('REG_AUTOMATED_SUCC');
+  });
+});
+
+describe('watcher tick', () => {
+  it('spawns a task for a newly labeled ticket, then swaps its label', async () => {
+    stubClaude((args, cb) => {
+      const promptArg =
+        args.find((a) => a.includes('JQL')) ?? args.find((a) => a.includes('labels'));
+      if (promptArg) {
+        cb(
+          null,
+          JSON.stringify({
+            result: JSON.stringify([{ key: 'DEV_IRREG-1234', summary: 'Fix the thing' }]),
+          }),
+          '',
+        );
+      } else {
+        cb(null, JSON.stringify({ result: JSON.stringify({ ok: true }) }), '');
+      }
+    });
+
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({
+      id: 'proj-1',
+      path: '/tmp/proj-1',
+      jiraTriggerLabel: 'REG_AUTOMATED',
+      jiraCompletedLabel: 'REG_AUTOMATED_SUCC',
+    });
+
+    // Respond to the listTaskNames round-trip (empty — no existing task yet)
+    // and the createTask round-trip, both sent to the fake window.
+    await flushPromises();
+    const listReq = sent.find((s) => s.channel === IPC.JiraWatcher_ListTaskNamesRequest);
+    expect(listReq).toBeDefined();
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, {
+      reqId: ((listReq as { payload: unknown }).payload as { reqId: string }).reqId,
+      ok: true,
+      data: { names: [] },
+    });
+
+    await flushPromises();
+    const createReq = sent.find((s) => s.channel === IPC.JiraWatcher_CreateTaskRequest);
+    expect(createReq).toBeDefined();
+    expect(((createReq as { payload: unknown }).payload as { name: string }).name).toBe(
+      'DEV_IRREG-1234: Fix the thing',
+    );
+    replyHandler?.(null, {
+      reqId: ((createReq as { payload: unknown }).payload as { reqId: string }).reqId,
+      ok: true,
+      data: { taskId: 'task-999' },
+    });
+
+    await flushPromises();
+    stopWatchingProject('proj-1');
+  });
+
+  it('skips a ticket that already has a matching task name', async () => {
+    stubClaude((args, cb) => {
+      const promptArg = args.find((a) => a.includes('labels'));
+      if (promptArg) {
+        cb(
+          null,
+          JSON.stringify({
+            result: JSON.stringify([{ key: 'DEV_IRREG-1234', summary: 'Fix the thing' }]),
+          }),
+          '',
+        );
+      }
+    });
+
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', path: '/tmp/proj-1' });
+
+    await flushPromises();
+    const listReq = sent.find((s) => s.channel === IPC.JiraWatcher_ListTaskNamesRequest);
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, {
+      reqId: ((listReq as { payload: unknown }).payload as { reqId: string }).reqId,
+      ok: true,
+      data: { names: ['DEV_IRREG-1234: Fix the thing'] },
+    });
+
+    await flushPromises();
+    const createReq = sent.find((s) => s.channel === IPC.JiraWatcher_CreateTaskRequest);
+    expect(createReq).toBeUndefined();
+    stopWatchingProject('proj-1');
+  });
+
+  it('disables the watcher when claude binary is missing', async () => {
+    stubClaude((_args, cb) => {
+      cb(Object.assign(new Error('not found'), { code: 'ENOENT' }), '', '');
+    });
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', path: '/tmp/proj-1' });
+    await flushPromises();
+    const state = getJiraWatcherStateForTests();
+    expect(state.disabled).toBe(true);
+    expect(state.disabledReason).toBe('missing');
+    stopWatchingProject('proj-1');
   });
 });

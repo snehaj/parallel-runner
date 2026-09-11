@@ -37,7 +37,8 @@ import {
   refreshPrChecksWatcher,
   isPrUrl,
 } from './pr-checks.js';
-import { initJiraWatcherBridge } from './jira-watcher.js';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- startWatchingProject/stopWatchingProject consumed by Task 8's ipcMain.handle entries
+import { initJiraWatcher, startWatchingProject, stopWatchingProject } from './jira-watcher.js';
 import { readCoverageSummary } from './coverage.js';
 import { loadEslintQualityFindings } from './eslint-quality-findings.js';
 import { startRemoteServer, getMCPLogs, type RemoteProject } from '../remote/server.js';
@@ -845,9 +846,8 @@ export function registerAllHandlers(win: BrowserWindow): void {
   // --- PR CI status watcher ---
   initPrChecks(win);
 
-  // --- Jira board watcher (task-creation bridge) ---
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- consumed by Task 7's polling loop
-  const jiraWatcherBridge = initJiraWatcherBridge(win);
+  // --- Jira board watcher ---
+  initJiraWatcher(win);
   ipcMain.handle(IPC.StartPrChecksWatcher, (_e, args) => {
     assertString(args.taskId, 'taskId');
     assertString(args.prUrl, 'prUrl');

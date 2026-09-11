@@ -146,3 +146,201 @@ export async function swapTicketLabel(
     `once done, no other text.`;
   await runClaudeJson<{ ok: boolean }>(prompt);
 }
+
+const TICK_MS = 3 * 60_000; // 3 minutes — Jira polling has no reason to match pr-checks.ts's 30s
+const DEFAULT_TRIGGER_LABEL = 'REG_AUTOMATED';
+const DEFAULT_COMPLETED_LABEL = 'REG_AUTOMATED_SUCC';
+
+interface WatchedProject {
+  id: string;
+  path: string;
+  triggerLabel: string;
+  completedLabel: string;
+}
+
+let jiraWin: BrowserWindow | null = null;
+let jiraBridge: ReturnType<typeof initJiraWatcherBridge> | null = null;
+let watched = new Map<string, WatchedProject>();
+let jiraTickHandle: ReturnType<typeof setInterval> | null = null;
+let jiraIsPolling = false;
+let jiraDisabled = false;
+let jiraDisabledReason: 'missing' | 'auth' | null = null;
+
+/** Public: wire window-lifecycle listeners and create the task-creation
+ *  bridge. Call once from registerAllHandlers, same as initPrChecks. */
+export function initJiraWatcher(mainWindow: BrowserWindow): void {
+  jiraWin = mainWindow;
+  jiraBridge = initJiraWatcherBridge(mainWindow);
+  mainWindow.on('show', () => {
+    if (watched.size > 0 && !jiraDisabled) ensureJiraInterval();
+  });
+  mainWindow.on('hide', () => clearJiraTickInterval());
+  mainWindow.on('minimize', () => clearJiraTickInterval());
+  mainWindow.on('restore', () => {
+    if (watched.size > 0 && !jiraDisabled) ensureJiraInterval();
+  });
+  mainWindow.on('closed', () => {
+    jiraWin = null;
+    clearJiraTickInterval();
+    watched.clear();
+  });
+}
+
+/** Public: enable watching for one project. Derives its project key from
+ *  the last path segment uppercased with hyphens/underscores stripped to
+ *  match Jira's own key convention — actually, project key must come from
+ *  the caller since it can't be reliably derived from a folder name; see
+ *  Task 9, which passes it from a new Project field OR (simpler,
+ *  chosen here) derives it from jiraTriggerLabel's own scope: this function
+ *  takes the raw pieces so the caller (Task 8's frontend subscription)
+ *  decides how the project key is known. */
+export function startWatchingProject(project: {
+  id: string;
+  path: string;
+  jiraProjectKey?: string;
+  jiraTriggerLabel?: string;
+  jiraCompletedLabel?: string;
+}): void {
+  if (jiraDisabled) return;
+  watched.set(project.id, {
+    id: project.id,
+    path: project.path,
+    triggerLabel: project.jiraTriggerLabel ?? DEFAULT_TRIGGER_LABEL,
+    completedLabel: project.jiraCompletedLabel ?? DEFAULT_COMPLETED_LABEL,
+  });
+  ensureJiraInterval();
+  void pollOneProject(project.id, project.jiraProjectKey);
+}
+
+export function stopWatchingProject(projectId: string): void {
+  watched.delete(projectId);
+  if (watched.size === 0) clearJiraTickInterval();
+}
+
+function jiraWindowIsVisible(): boolean {
+  return !!jiraWin && !jiraWin.isDestroyed() && jiraWin.isVisible();
+}
+
+function ensureJiraInterval(): void {
+  if (jiraTickHandle || jiraDisabled) return;
+  if (!jiraWindowIsVisible()) return;
+  jiraTickHandle = setInterval(() => {
+    runJiraTick().catch((err) => console.warn('[jira-watcher] tick failed:', err));
+  }, TICK_MS);
+  jiraTickHandle.unref();
+}
+
+function clearJiraTickInterval(): void {
+  if (jiraTickHandle) {
+    clearInterval(jiraTickHandle);
+    jiraTickHandle = null;
+  }
+}
+
+async function runJiraTick(): Promise<void> {
+  if (jiraDisabled || jiraIsPolling) return;
+  jiraIsPolling = true;
+  try {
+    await Promise.all(
+      Array.from(watched.keys()).map((id) => pollOneProject(id).catch(handleClaudeError)),
+    );
+  } finally {
+    jiraIsPolling = false;
+  }
+}
+
+async function pollOneProject(projectId: string, jiraProjectKeyOverride?: string): Promise<void> {
+  const entry = watched.get(projectId);
+  if (!entry || !jiraBridge) return;
+  // jiraProjectKeyOverride threading is a placeholder for Task 9's actual
+  // per-project Jira key source; pollOneProject accepts it optionally so
+  // this task's tests (which don't set one) still exercise the rest of the
+  // flow. Task 9 must supply a real value — see that task's notes.
+  const projectKey = jiraProjectKeyOverride ?? '';
+
+  let tickets: { key: string; summary: string }[];
+  try {
+    tickets = await queryLabeledTickets(projectKey, entry.triggerLabel);
+  } catch (err) {
+    handleClaudeError(err);
+    return;
+  }
+
+  for (const ticket of tickets) {
+    let existingNames: string[];
+    try {
+      existingNames = await jiraBridge.listTaskNames(projectId);
+    } catch (err) {
+      console.warn('[jira-watcher] listTaskNames failed:', err);
+      continue;
+    }
+    if (hasTicketKey(existingNames, ticket.key)) continue;
+
+    let created: { taskId: string };
+    try {
+      created = await jiraBridge.createTask({
+        projectId,
+        name: buildTaskName(ticket.key, ticket.summary),
+        prompt: `Implement ${ticket.key}: ${ticket.summary}`,
+      });
+    } catch (err) {
+      console.warn('[jira-watcher] createTask failed for', ticket.key, err);
+      continue;
+    }
+    void created; // taskId not currently used further, but kept for future logging/telemetry
+
+    try {
+      await swapTicketLabel(ticket.key, entry.triggerLabel, entry.completedLabel);
+    } catch (err) {
+      console.warn('[jira-watcher] label swap failed for', ticket.key, err);
+      // Ticket keeps triggerLabel — caught by the hasTicketKey check next tick.
+    }
+  }
+}
+
+function handleClaudeError(err: unknown): void {
+  if (jiraDisabled) return;
+  const code = (err as NodeJS.ErrnoException)?.code;
+  if (code === 'ENOENT') {
+    jiraDisabled = true;
+    jiraDisabledReason = 'missing';
+    console.warn('[jira-watcher] claude CLI not found — Jira watcher disabled for this session');
+    clearJiraTickInterval();
+    return;
+  }
+  const stderr = (err as { stderr?: string })?.stderr ?? '';
+  if (typeof stderr === 'string' && /not logged into|authentication required/i.test(stderr)) {
+    jiraDisabled = true;
+    jiraDisabledReason = 'auth';
+    console.warn(
+      '[jira-watcher] claude not authenticated — Jira watcher disabled for this session',
+    );
+    clearJiraTickInterval();
+    return;
+  }
+  console.warn('[jira-watcher] transient failure:', (err as Error)?.message ?? err);
+}
+
+// --- Test seams ---
+
+export function __resetJiraWatcherForTests(): void {
+  jiraWin = null;
+  jiraBridge = null;
+  watched = new Map();
+  clearJiraTickInterval();
+  jiraIsPolling = false;
+  jiraDisabled = false;
+  jiraDisabledReason = null;
+}
+
+export function getJiraWatcherStateForTests(): {
+  disabled: boolean;
+  disabledReason: 'missing' | 'auth' | null;
+  watchedProjectIds: string[];
+} {
+  return {
+    disabled: jiraDisabled,
+    disabledReason: jiraDisabledReason,
+    watchedProjectIds: Array.from(watched.keys()),
+  };
+}
