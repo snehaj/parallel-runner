@@ -27,6 +27,10 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
   const [defaultGitIsolation, setDefaultGitIsolation] = createSignal<GitIsolationMode>('worktree');
   const [defaultBaseBranch, setDefaultBaseBranch] = createSignal('');
   const [coverageReportPath, setCoverageReportPath] = createSignal('');
+  const [jiraWatchEnabled, setJiraWatchEnabled] = createSignal(false);
+  const [jiraProjectKey, setJiraProjectKey] = createSignal('');
+  const [jiraTriggerLabel, setJiraTriggerLabel] = createSignal('');
+  const [jiraCompletedLabel, setJiraCompletedLabel] = createSignal('');
   const [bookmarks, setBookmarks] = createSignal<TerminalBookmark[]>([]);
   const [newCommand, setNewCommand] = createSignal('');
   const [showImportDialog, setShowImportDialog] = createSignal(false);
@@ -44,6 +48,10 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
     setDefaultGitIsolation(p.defaultGitIsolation ?? 'worktree');
     setDefaultBaseBranch(p.defaultBaseBranch ?? '');
     setCoverageReportPath(p.coverageReportPath ?? '');
+    setJiraWatchEnabled(p.jiraWatchEnabled ?? false);
+    setJiraProjectKey(p.jiraProjectKey ?? '');
+    setJiraTriggerLabel(p.jiraTriggerLabel ?? '');
+    setJiraCompletedLabel(p.jiraCompletedLabel ?? '');
     setBookmarks(p.terminalBookmarks ? [...p.terminalBookmarks] : []);
     setNewCommand('');
     setConfirmRemove(false);
@@ -79,6 +87,10 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
       defaultGitIsolation: defaultGitIsolation(),
       defaultBaseBranch: defaultBaseBranch() || undefined,
       coverageReportPath: coverageReportPath().trim() || undefined,
+      jiraWatchEnabled: jiraWatchEnabled(),
+      jiraProjectKey: jiraProjectKey().trim() || undefined,
+      jiraTriggerLabel: jiraTriggerLabel().trim() || undefined,
+      jiraCompletedLabel: jiraCompletedLabel().trim() || undefined,
       terminalBookmarks: bookmarks(),
     });
     props.onClose();
@@ -417,6 +429,100 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
                 Leave blank to try <code>coverage/coverage-summary.json</code>, then{' '}
                 <code>coverage/lcov.info</code>.
               </div>
+            </div>
+
+            {/* Jira board watcher */}
+            <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
+              <label
+                style={{
+                  display: 'flex',
+                  'align-items': 'center',
+                  gap: '8px',
+                  cursor: 'pointer',
+                  'font-size': '14px',
+                  color: theme.fg,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={jiraWatchEnabled()}
+                  onChange={(e) => setJiraWatchEnabled(e.currentTarget.checked)}
+                  style={{ cursor: 'pointer' }}
+                />
+                Watch Jira board for labeled tickets
+              </label>
+              <Show when={jiraWatchEnabled()}>
+                <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
+                  <label style={sectionLabelStyle}>Jira project key</label>
+                  <input
+                    class="input-field"
+                    type="text"
+                    value={jiraProjectKey()}
+                    onInput={(e) => setJiraProjectKey(e.currentTarget.value)}
+                    placeholder="DEV_IRREG"
+                    style={{
+                      background: theme.bgInput,
+                      border: `1px solid ${theme.border}`,
+                      'border-radius': '8px',
+                      padding: '10px 14px',
+                      color: theme.fg,
+                      'font-size': '14px',
+                      'font-family': "'JetBrains Mono', monospace",
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
+                  <label style={sectionLabelStyle}>
+                    Trigger label{' '}
+                    <span style={{ opacity: '0.5', 'text-transform': 'none' }}>
+                      (blank = REG_AUTOMATED)
+                    </span>
+                  </label>
+                  <input
+                    class="input-field"
+                    type="text"
+                    value={jiraTriggerLabel()}
+                    onInput={(e) => setJiraTriggerLabel(e.currentTarget.value)}
+                    placeholder="REG_AUTOMATED"
+                    style={{
+                      background: theme.bgInput,
+                      border: `1px solid ${theme.border}`,
+                      'border-radius': '8px',
+                      padding: '10px 14px',
+                      color: theme.fg,
+                      'font-size': '14px',
+                      'font-family': "'JetBrains Mono', monospace",
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
+                  <label style={sectionLabelStyle}>
+                    Completed label{' '}
+                    <span style={{ opacity: '0.5', 'text-transform': 'none' }}>
+                      (blank = REG_AUTOMATED_SUCC)
+                    </span>
+                  </label>
+                  <input
+                    class="input-field"
+                    type="text"
+                    value={jiraCompletedLabel()}
+                    onInput={(e) => setJiraCompletedLabel(e.currentTarget.value)}
+                    placeholder="REG_AUTOMATED_SUCC"
+                    style={{
+                      background: theme.bgInput,
+                      border: `1px solid ${theme.border}`,
+                      'border-radius': '8px',
+                      padding: '10px 14px',
+                      color: theme.fg,
+                      'font-size': '14px',
+                      'font-family': "'JetBrains Mono', monospace",
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+              </Show>
             </div>
 
             {/* Command Bookmarks */}
