@@ -958,6 +958,33 @@ This task assembles everything from Tasks 1/5/6 into the actual `pr-checks.ts`-s
 
 - [ ] **Step 1: Write the failing test**
 
+First, extend the existing `fakeWindow` helper (from Task 5) — it currently
+only implements `isDestroyed` and `webContents.send`, but `initJiraWatcher`
+(this task) calls `mainWindow.on(...)` five times and `jiraWindowIsVisible()`
+calls `.isVisible()`; without these, `initJiraWatcher(win)` throws
+`TypeError: win.on is not a function` immediately, before any test logic
+runs. Update `fakeWindow` to:
+
+```typescript
+function fakeWindow(sent: Array<{ channel: string; payload: unknown }>) {
+  return {
+    isDestroyed: () => false,
+    isVisible: () => true,
+    on: () => {},
+    webContents: {
+      send: (channel: string, payload: unknown) => {
+        sent.push({ channel, payload });
+      },
+    },
+  } as unknown as import('electron').BrowserWindow;
+}
+```
+
+(`isVisible: () => true` so `ensureJiraInterval`'s visibility check doesn't
+block the tick from starting; `on: () => {}` is a no-op since these tests
+call `startWatchingProject`/`stopWatchingProject` directly rather than
+relying on window show/hide events.)
+
 Add to `electron/ipc/jira-watcher.test.ts` (this test file is getting long — that's expected, matching `pr-checks.test.ts`'s own 580 lines for a module of similar scope):
 
 ```typescript
