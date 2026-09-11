@@ -139,6 +139,16 @@ export interface BranchPrDetectionResult {
   unavailable?: 'missing' | 'auth';
 }
 
+/** Pushed main→renderer on IPC.JiraWatcherStatus whenever the Jira board
+ *  watcher's availability changes, plus once when a project starts being
+ *  watched so the renderer has an initial state. `disabledReason` mirrors
+ *  pr-checks.ts's taxonomy: 'missing' = claude CLI not found, 'auth' = Claude
+ *  Code not authenticated. */
+export interface JiraWatcherStatusPayload {
+  disabled: boolean;
+  disabledReason: 'missing' | 'auth' | null;
+}
+
 export interface EslintQualityFinding {
   id: string;
   source: 'eslint';

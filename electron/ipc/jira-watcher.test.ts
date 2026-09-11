@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { promisify } from 'util';
 
 vi.mock('electron', () => {
@@ -41,6 +41,8 @@ import {
   startWatchingProject,
   stopWatchingProject,
   getJiraWatcherStateForTests,
+  __resetJiraWatcherForTests,
+  __runJiraTickForTests,
 } from './jira-watcher.js';
 import { IPC } from './channels.js';
 
@@ -58,17 +60,27 @@ function stubClaude(handler: (args: string[], cb: ExecCb) => void): string[][] {
   return calls;
 }
 
-function fakeWindow(sent: Array<{ channel: string; payload: unknown }>) {
+function fakeWindow(
+  sent: Array<{ channel: string; payload: unknown }>,
+  windowEvents?: Map<string, () => void>,
+) {
   return {
     isDestroyed: () => false,
     isVisible: () => true,
-    on: () => {},
+    on: (event: string, fn: () => void) => {
+      windowEvents?.set(event, fn);
+    },
     webContents: {
       send: (channel: string, payload: unknown) => {
         sent.push({ channel, payload });
       },
     },
   } as unknown as import('electron').BrowserWindow;
+}
+
+/** Every prompt string `claude -p` was invoked with, in call order. */
+function promptsFrom(calls: string[][]): string[] {
+  return calls.map((args) => args[args.indexOf('-p') + 1]);
 }
 
 describe('hasTicketKey', () => {
@@ -193,6 +205,10 @@ describe('swapTicketLabel', () => {
 });
 
 describe('watcher tick', () => {
+  beforeEach(() => {
+    __resetJiraWatcherForTests();
+  });
+
   it('spawns a task for a newly labeled ticket, then swaps its label', async () => {
     stubClaude((args, cb) => {
       const promptArg =
@@ -296,6 +312,75 @@ describe('watcher tick', () => {
     const state = getJiraWatcherStateForTests();
     expect(state.disabled).toBe(true);
     expect(state.disabledReason).toBe('missing');
+    stopWatchingProject('proj-1');
+  });
+
+  it('pushes JiraWatcherStatus on start and again when the watcher becomes disabled', async () => {
+    stubClaude((_args, cb) => {
+      cb(Object.assign(new Error('not found'), { code: 'ENOENT' }), '', '');
+    });
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+
+    // Initial state, sent synchronously so the renderer isn't blank.
+    const initial = sent.filter((s) => s.channel === IPC.JiraWatcherStatus);
+    expect(initial).toHaveLength(1);
+    expect(initial[0].payload).toEqual({ disabled: false, disabledReason: null });
+
+    await flushPromises();
+    const statuses = sent.filter((s) => s.channel === IPC.JiraWatcherStatus);
+    expect(statuses[statuses.length - 1]?.payload).toEqual({
+      disabled: true,
+      disabledReason: 'missing',
+    });
+    stopWatchingProject('proj-1');
+  });
+
+  // Regression: the project key used to be threaded as a per-call argument
+  // that only the one-shot poll in startWatchingProject supplied, so every
+  // scheduled tick queried `project =  AND labels = ...` with an empty key.
+  it('queries with the configured jiraProjectKey on a SECOND (scheduled) tick', async () => {
+    const calls = stubClaude((_args, cb) => {
+      cb(null, JSON.stringify({ result: JSON.stringify([]) }), '');
+    });
+
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    expect(promptsFrom(calls)).toHaveLength(1);
+
+    await __runJiraTickForTests();
+    const prompts = promptsFrom(calls);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('project = DEV_IRREG');
+    expect(prompts[1]).not.toContain('project =  AND');
+    stopWatchingProject('proj-1');
+  });
+
+  it('fires an immediate tick on window show and restore, not just on the interval', async () => {
+    const calls = stubClaude((_args, cb) => {
+      cb(null, JSON.stringify({ result: JSON.stringify([]) }), '');
+    });
+
+    const windowEvents = new Map<string, () => void>();
+    const win = fakeWindow([], windowEvents);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    expect(calls).toHaveLength(1);
+
+    windowEvents.get('show')?.();
+    await flushPromises();
+    expect(calls).toHaveLength(2);
+
+    windowEvents.get('restore')?.();
+    await flushPromises();
+    expect(calls).toHaveLength(3);
+    const prompts = promptsFrom(calls);
+    expect(prompts[prompts.length - 1]).toContain('project = DEV_IRREG');
     stopWatchingProject('proj-1');
   });
 });

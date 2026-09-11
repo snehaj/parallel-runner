@@ -152,6 +152,7 @@ const ALLOWED_CHANNELS = new Set([
   'jira_watcher_renderer_reply',
   'start_jira_watcher',
   'stop_jira_watcher',
+  'jira_watcher_status',
 ]);
 
 function isAllowedChannel(channel) {
