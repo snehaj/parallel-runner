@@ -8,11 +8,27 @@ vi.mock('../lib/ipc', () => ({
   fireAndForget: (...args: unknown[]) => mockFireAndForget(...args),
 }));
 
-import { startJiraWatcherSubscription } from './jira-watcher';
+import {
+  startJiraWatcherSubscription,
+  jiraWatcherStatus,
+  jiraWatcherStatusLabel,
+  __resetJiraWatcherStatusForTests,
+} from './jira-watcher';
+
+const mockOn = vi.fn();
+
+function statusListener(): ((data: unknown) => void) | undefined {
+  return mockOn.mock.calls.find(([channel]) => channel === IPC.JiraWatcherStatus)?.[1] as
+    ((data: unknown) => void) | undefined;
+}
 
 describe('startJiraWatcherSubscription', () => {
   beforeEach(() => {
     mockFireAndForget.mockClear();
+    mockOn.mockClear();
+    mockOn.mockReturnValue(vi.fn());
+    vi.stubGlobal('window', { electron: { ipcRenderer: { on: mockOn } } });
+    __resetJiraWatcherStatusForTests();
     setStore('projects', []);
   });
 
@@ -68,6 +84,66 @@ describe('startJiraWatcherSubscription', () => {
     mockFireAndForget.mockClear();
     stop?.();
     expect(mockFireAndForget).toHaveBeenCalledWith(IPC.StopJiraWatcher, { projectId: 'p1' });
+    disposeRoot?.();
+  });
+});
+
+describe('jiraWatcherStatus', () => {
+  beforeEach(() => {
+    mockFireAndForget.mockClear();
+    mockOn.mockClear();
+    mockOn.mockReturnValue(vi.fn());
+    vi.stubGlobal('window', { electron: { ipcRenderer: { on: mockOn } } });
+    __resetJiraWatcherStatusForTests();
+    setStore('projects', []);
+  });
+
+  it('defaults to enabled with no reason', () => {
+    expect(jiraWatcherStatus()).toEqual({ disabled: false, disabledReason: null });
+    expect(jiraWatcherStatusLabel()).toBe('Watching');
+  });
+
+  it('subscribes to JiraWatcherStatus and mirrors a disabled push', () => {
+    let disposeRoot: (() => void) | undefined;
+    let stop: (() => void) | undefined;
+    createRoot((dispose) => {
+      disposeRoot = dispose;
+      stop = startJiraWatcherSubscription();
+    });
+    const listener = statusListener();
+    expect(listener).toBeDefined();
+
+    listener?.({ disabled: true, disabledReason: 'auth' });
+    expect(jiraWatcherStatus()).toEqual({ disabled: true, disabledReason: 'auth' });
+    expect(jiraWatcherStatusLabel()).toBe('Disabled: Claude Code not authenticated');
+
+    listener?.({ disabled: true, disabledReason: 'missing' });
+    expect(jiraWatcherStatusLabel()).toBe('Disabled: claude CLI not found');
+
+    listener?.({ disabled: false, disabledReason: null });
+    expect(jiraWatcherStatus()).toEqual({ disabled: false, disabledReason: null });
+    stop?.();
+    disposeRoot?.();
+  });
+
+  it('ignores malformed pushes', () => {
+    let disposeRoot: (() => void) | undefined;
+    let stop: (() => void) | undefined;
+    createRoot((dispose) => {
+      disposeRoot = dispose;
+      stop = startJiraWatcherSubscription();
+    });
+    const listener = statusListener();
+    listener?.(null);
+    listener?.({});
+    listener?.({ disabled: 'yes' });
+    expect(jiraWatcherStatus()).toEqual({ disabled: false, disabledReason: null });
+
+    // An unknown reason string degrades to a bare "Disabled", not a crash.
+    listener?.({ disabled: true, disabledReason: 'weird' });
+    expect(jiraWatcherStatus()).toEqual({ disabled: true, disabledReason: null });
+    expect(jiraWatcherStatusLabel()).toBe('Disabled');
+    stop?.();
     disposeRoot?.();
   });
 });

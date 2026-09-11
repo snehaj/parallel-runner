@@ -3,6 +3,7 @@ import { Dialog } from './Dialog';
 import { updateProject, PASTEL_HUES, isProjectMissing, relinkProject } from '../store/store';
 import { sanitizeBranchPrefix, toBranchName } from '../lib/branch-name';
 import { theme, sectionLabelStyle } from '../lib/theme';
+import { jiraWatcherStatus, jiraWatcherStatusLabel } from '../store/jira-watcher';
 import type { Project, TerminalBookmark, GitIsolationMode } from '../store/types';
 import { SegmentedButtons } from './SegmentedButtons';
 import { ImportWorktreesDialog } from './ImportWorktreesDialog';
@@ -452,6 +453,18 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
                 Watch Jira board for labeled tickets
               </label>
               <Show when={jiraWatchEnabled()}>
+                {/* Watcher availability, pushed from the main process. The
+                    toggle can be on while the watcher has disabled itself
+                    (claude CLI missing / not authenticated). */}
+                <div
+                  style={{
+                    'font-size': '12px',
+                    color: jiraWatcherStatus().disabled ? theme.warning : theme.fgSubtle,
+                    padding: '0 2px',
+                  }}
+                >
+                  Status: {jiraWatcherStatusLabel()}
+                </div>
                 <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
                   <label style={sectionLabelStyle}>Jira project key</label>
                   <input
