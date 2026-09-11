@@ -29,9 +29,19 @@ interface SetNotesRequest extends RendererRequest {
   notes: string;
 }
 
-function reply(reqId: string, ok: boolean, data?: unknown, error?: string): void {
+interface ListTaskNamesRequest extends RendererRequest {
+  projectId: string;
+}
+
+function reply(
+  reqId: string,
+  ok: boolean,
+  data?: unknown,
+  error?: string,
+  channel: IPC = IPC.Remote_RendererReply,
+): void {
   // Fire-and-forget: main resolves/rejects the pending HTTP response by reqId.
-  invoke(IPC.Remote_RendererReply, { reqId, ok, data, error }).catch(() => {});
+  invoke(channel, { reqId, ok, data, error }).catch(() => {});
 }
 
 function handleGetProjects(req: RendererRequest): void {
@@ -116,6 +126,14 @@ function handleSetNotes(req: SetNotesRequest): void {
   reply(req.reqId, true, { ok: true });
 }
 
+function handleListTaskNames(req: ListTaskNamesRequest): void {
+  const names = store.taskOrder
+    .map((id) => store.tasks[id])
+    .filter((task) => task?.projectId === req.projectId)
+    .map((task) => task.name);
+  reply(req.reqId, true, { names }, undefined, IPC.JiraWatcher_RendererReply);
+}
+
 /** Subscribe to mobile task-creation requests. Returns an unsubscribe fn. */
 export function startRemoteTaskHandlers(): () => void {
   const offProjects = window.electron.ipcRenderer.on(
@@ -142,10 +160,17 @@ export function startRemoteTaskHandlers(): () => void {
       if (data && typeof data === 'object') handleSetNotes(data as SetNotesRequest);
     },
   );
+  const offListTaskNames = window.electron.ipcRenderer.on(
+    IPC.JiraWatcher_ListTaskNamesRequest,
+    (data: unknown) => {
+      if (data && typeof data === 'object') handleListTaskNames(data as ListTaskNamesRequest);
+    },
+  );
   return () => {
     offProjects();
     offCreate();
     offGetNotes();
     offSetNotes();
+    offListTaskNames();
   };
 }
