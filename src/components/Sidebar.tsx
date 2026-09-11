@@ -821,6 +821,18 @@ export function Sidebar() {
                           'flex-shrink': '0',
                         }}
                       />
+                      <Show when={project.jiraWatchEnabled}>
+                        <div
+                          title="Watching Jira board"
+                          style={{
+                            'font-size': sf(10),
+                            color: theme.fgSubtle,
+                            'flex-shrink': '0',
+                          }}
+                        >
+                          🔖
+                        </div>
+                      </Show>
                       <div style={{ flex: '1', 'min-width': '0', overflow: 'hidden' }}>
                         <div
                           style={{
