@@ -848,7 +848,7 @@ describe('queryLabeledTickets', () => {
 describe('swapTicketLabel', () => {
   it('invokes claude -p with both the remove and add label instructions', async () => {
     const calls = stubClaude((_args, cb) => {
-      cb(null, JSON.stringify({ result: 'ok' }), '');
+      cb(null, JSON.stringify({ result: JSON.stringify({ ok: true }) }), '');
     });
     await swapTicketLabel('DEV_IRREG-1234', 'REG_AUTOMATED', 'REG_AUTOMATED_SUCC');
     expect(calls).toHaveLength(1);
