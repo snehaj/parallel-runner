@@ -1565,6 +1565,16 @@ and remove `path: string;` from `startWatchingProject`'s parameter type. Remove 
 `path: project.path,` line from `startWatchingProject`'s body where it builds the `WatchedProject`
 it stores.
 
+**Also update `electron/ipc/jira-watcher.test.ts`** (Task 7's own test file) to match: it has
+3 occurrences of `path: '/tmp/proj-1'` passed to `startWatchingProject(...)` in the "watcher
+tick" describe block (one on its own line in the first test, two inline in the second and
+third tests). Remove all three — TypeScript's excess-property check on object literals flags
+extra properties assigned to a narrower type, so leaving them will fail `npm run typecheck`
+once the `path` field above no longer exists on the type. Include this file in this step's
+commit alongside `types.ts`/`projects.ts`/`register.ts` (the final `git add` in Step 7 below
+already lists `electron/ipc/jira-watcher.ts` — add `electron/ipc/jira-watcher.test.ts` to that
+same commit too, since both files change together for this same reason).
+
 - [ ] **Step 6b: Wire the two new `ipcMain.handle` entries in `register.ts`**
 
 Find the existing `StartPrChecksWatcher`/`StopPrChecksWatcher` handlers in `register.ts` and add
@@ -1620,7 +1630,7 @@ Expected: both pass.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add electron/ipc/channel-manifest.json electron/ipc/register.ts electron/ipc/jira-watcher.ts src/store/jira-watcher.ts src/store/jira-watcher.test.ts src/App.tsx
+git add electron/ipc/channel-manifest.json electron/ipc/register.ts electron/ipc/jira-watcher.ts electron/ipc/jira-watcher.test.ts src/store/jira-watcher.ts src/store/jira-watcher.test.ts src/App.tsx
 git commit -m "feat(jira-watcher): wire start/stop IPC handlers and frontend subscription"
 ```
 
