@@ -215,7 +215,6 @@ describe('watcher tick', () => {
     initJiraWatcher(win);
     startWatchingProject({
       id: 'proj-1',
-      path: '/tmp/proj-1',
       jiraTriggerLabel: 'REG_AUTOMATED',
       jiraCompletedLabel: 'REG_AUTOMATED_SUCC',
     });
@@ -267,7 +266,7 @@ describe('watcher tick', () => {
     const sent: Array<{ channel: string; payload: unknown }> = [];
     const win = fakeWindow(sent);
     initJiraWatcher(win);
-    startWatchingProject({ id: 'proj-1', path: '/tmp/proj-1' });
+    startWatchingProject({ id: 'proj-1' });
 
     await flushPromises();
     const listReq = sent.find((s) => s.channel === IPC.JiraWatcher_ListTaskNamesRequest);
@@ -292,7 +291,7 @@ describe('watcher tick', () => {
     });
     const win = fakeWindow([]);
     initJiraWatcher(win);
-    startWatchingProject({ id: 'proj-1', path: '/tmp/proj-1' });
+    startWatchingProject({ id: 'proj-1' });
     await flushPromises();
     const state = getJiraWatcherStateForTests();
     expect(state.disabled).toBe(true);

@@ -153,7 +153,6 @@ const DEFAULT_COMPLETED_LABEL = 'REG_AUTOMATED_SUCC';
 
 interface WatchedProject {
   id: string;
-  path: string;
   triggerLabel: string;
   completedLabel: string;
 }
@@ -196,7 +195,6 @@ export function initJiraWatcher(mainWindow: BrowserWindow): void {
  *  decides how the project key is known. */
 export function startWatchingProject(project: {
   id: string;
-  path: string;
   jiraProjectKey?: string;
   jiraTriggerLabel?: string;
   jiraCompletedLabel?: string;
@@ -204,7 +202,6 @@ export function startWatchingProject(project: {
   if (jiraDisabled) return;
   watched.set(project.id, {
     id: project.id,
-    path: project.path,
     triggerLabel: project.jiraTriggerLabel ?? DEFAULT_TRIGGER_LABEL,
     completedLabel: project.jiraCompletedLabel ?? DEFAULT_COMPLETED_LABEL,
   });
