@@ -358,43 +358,52 @@ If it exists, read it fully first and match its style. This plan assumes it does
 
 Create `src/store/remoteTaskHandler.test.ts`:
 
+This repo's established pattern for testing renderer-side IPC listeners is
+`vi.stubGlobal('window', {...})` inside `beforeEach` (see
+`src/store/pr-checks.test.ts` — read it first for the exact shape), NOT a
+manual `globalThis.window = {...}` assignment. `vi.stubGlobal` auto-restores
+between test files, so it doesn't leak into unrelated tests. Follow that
+file's structure exactly:
+
 ```typescript
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { mockInvoke } = vi.hoisted(() => ({ mockInvoke: vi.fn() }));
+vi.mock('../lib/ipc', () => ({ invoke: mockInvoke }));
+
 import { setStore } from './core';
 import { IPC } from '../../electron/ipc/channels';
-
-const mockInvoke = vi.fn();
-vi.mock('../lib/ipc', () => ({ invoke: (...args: unknown[]) => mockInvoke(...args) }));
-
-const listeners = new Map<string, (data: unknown) => void>();
-(globalThis as { window?: unknown }).window = {
-  electron: {
-    ipcRenderer: {
-      on: (channel: string, cb: (data: unknown) => void) => {
-        listeners.set(channel, cb);
-        return () => listeners.delete(channel);
-      },
-    },
-  },
-};
-
 import { startRemoteTaskHandlers } from './remoteTaskHandler';
 
-describe('handleListTaskNames', () => {
-  beforeEach(() => {
-    mockInvoke.mockClear();
-    listeners.clear();
-    setStore('taskOrder', ['t1', 't2', 't3']);
-    setStore('tasks', {
-      t1: { id: 't1', name: 'DEV_IRREG-100: Fix A', projectId: 'proj-1' },
-      t2: { id: 't2', name: 'DEV_IRREG-200: Fix B', projectId: 'proj-2' },
-      t3: { id: 't3', name: 'DEV_IRREG-300: Fix C', projectId: 'proj-1' },
-    });
-  });
+const mockOn = vi.fn();
 
+beforeEach(() => {
+  vi.clearAllMocks();
+  setStore('taskOrder', ['t1', 't2', 't3']);
+  setStore('tasks', {
+    t1: { id: 't1', name: 'DEV_IRREG-100: Fix A', projectId: 'proj-1' },
+    t2: { id: 't2', name: 'DEV_IRREG-200: Fix B', projectId: 'proj-2' },
+    t3: { id: 't3', name: 'DEV_IRREG-300: Fix C', projectId: 'proj-1' },
+  });
+  mockOn.mockReturnValue(vi.fn());
+  vi.stubGlobal('window', {
+    electron: {
+      ipcRenderer: {
+        on: mockOn,
+      },
+    },
+  });
+});
+
+function listenerFor(channel: string): ((data: unknown) => void) | undefined {
+  const call = mockOn.mock.calls.find((c) => c[0] === channel);
+  return call?.[1];
+}
+
+describe('handleListTaskNames', () => {
   it("replies with only the requested project's task names", () => {
-    const stop = startRemoteTaskHandlers();
-    const handler = listeners.get(IPC.JiraWatcher_ListTaskNamesRequest);
+    startRemoteTaskHandlers();
+    const handler = listenerFor(IPC.JiraWatcher_ListTaskNamesRequest);
     expect(handler).toBeDefined();
     handler?.({ reqId: 'req-1', projectId: 'proj-1' });
     expect(mockInvoke).toHaveBeenCalledWith(IPC.JiraWatcher_RendererReply, {
@@ -403,12 +412,11 @@ describe('handleListTaskNames', () => {
       data: { names: ['DEV_IRREG-100: Fix A', 'DEV_IRREG-300: Fix C'] },
       error: undefined,
     });
-    stop();
   });
 
   it('replies with an empty list for a project with no tasks', () => {
-    const stop = startRemoteTaskHandlers();
-    const handler = listeners.get(IPC.JiraWatcher_ListTaskNamesRequest);
+    startRemoteTaskHandlers();
+    const handler = listenerFor(IPC.JiraWatcher_ListTaskNamesRequest);
     handler?.({ reqId: 'req-2', projectId: 'proj-nonexistent' });
     expect(mockInvoke).toHaveBeenCalledWith(IPC.JiraWatcher_RendererReply, {
       reqId: 'req-2',
@@ -416,10 +424,17 @@ describe('handleListTaskNames', () => {
       data: { names: [] },
       error: undefined,
     });
-    stop();
   });
 });
 ```
+
+(`startRemoteTaskHandlers`'s returned cleanup function is not called at the
+end of each test here — `pr-checks.test.ts` doesn't call its own subscription's
+cleanup between tests either, since `vi.clearAllMocks()` in `beforeEach`
+and a fresh `window` stub each test already prevent cross-test leakage. If
+this causes any actual failure when the tests run, add `const stop = ...`
+and call `stop()` at the end of each `it` block — but don't add unneeded
+ceremony that doesn't match the file's own established style.)
 
 - [ ] **Step 3: Run test to verify it fails**
 
