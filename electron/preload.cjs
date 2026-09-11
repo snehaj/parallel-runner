@@ -149,6 +149,12 @@ const ALLOWED_CHANNELS = new Set([
   'mcp_stale_url_warning',
   'mcp_coordinated_task_closed',
   'mcp_task_cleanup_failed',
+  'jira_watcher_create_task_request',
+  'jira_watcher_list_task_names_request',
+  'jira_watcher_renderer_reply',
+  'start_jira_watcher',
+  'stop_jira_watcher',
+  'jira_watcher_status',
 ]);
 
 function isAllowedChannel(channel) {

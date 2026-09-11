@@ -89,6 +89,7 @@ import { ArenaOverlay } from './arena/ArenaOverlay';
 import { resetForNewMatch } from './arena/store';
 import { startDesktopNotificationWatcher } from './store/desktopNotifications';
 import { startPrChecksSubscription } from './store/pr-checks';
+import { startJiraWatcherSubscription } from './store/jira-watcher';
 import { startUpdateSubscription } from './store/updates';
 import { startRemoteTaskHandlers } from './store/remoteTaskHandler';
 import { startRemoteStatusSync } from './store/remoteStatusSync';
@@ -536,6 +537,7 @@ function App() {
     const stopMCPListeners = initMCPListeners();
     const stopNotificationWatcher = startDesktopNotificationWatcher(windowFocused);
     const stopPrChecksSubscription = startPrChecksSubscription();
+    const stopJiraWatcherSubscription = startJiraWatcherSubscription();
     const stopUpdateSubscription = startUpdateSubscription();
     const stopRemoteTaskHandlers = startRemoteTaskHandlers();
     const stopRemoteStatusSync = startRemoteStatusSync();
@@ -735,6 +737,7 @@ function App() {
       stopMCPListeners();
       stopNotificationWatcher();
       stopPrChecksSubscription();
+      stopJiraWatcherSubscription();
       stopUpdateSubscription();
       stopRemoteTaskHandlers();
       stopRemoteStatusSync();

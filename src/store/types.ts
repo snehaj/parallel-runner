@@ -75,6 +75,21 @@ export interface Project {
   coverageReportPath?: string;
   terminalBookmarks?: TerminalBookmark[];
   isGitRepo?: boolean; // undefined treated as true for backward compat
+  /** Enables the per-project Jira board watcher (polls for labeled tickets
+   *  and spawns a task for each). Default false/unset — opt-in per project. */
+  jiraWatchEnabled?: boolean;
+  /** Jira label that marks a ticket for automatic pickup. Default
+   *  'REG_AUTOMATED' if unset — see jira-watcher.ts's DEFAULT_TRIGGER_LABEL. */
+  jiraTriggerLabel?: string;
+  /** Jira label applied (replacing jiraTriggerLabel) once a task has been
+   *  spawned for a ticket. Default 'REG_AUTOMATED_SUCC' if unset — see
+   *  jira-watcher.ts's DEFAULT_COMPLETED_LABEL. */
+  jiraCompletedLabel?: string;
+  /** Jira project key (e.g. 'DEV_IRREG') this project's watcher queries.
+   *  Required for the watcher to do anything useful — unset means the
+   *  watcher has nothing to query and effectively does nothing even if
+   *  jiraWatchEnabled is true. */
+  jiraProjectKey?: string;
 }
 
 export interface Agent {

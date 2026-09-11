@@ -14,6 +14,7 @@ export type {
   FileDiffResult,
   GitIgnoredEntry,
   ImportableWorktree,
+  JiraWatcherStatusPayload,
   MergeResult,
   MergeStatus,
   PrCheckBucket,

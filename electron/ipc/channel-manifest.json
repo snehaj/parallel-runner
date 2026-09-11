@@ -86,6 +86,9 @@
   "Remote_SetNotesRequest": "remote_set_notes_request",
   "Remote_UpdateTaskStatus": "remote_update_task_status",
   "Remote_RendererReply": "remote_renderer_reply",
+  "JiraWatcher_CreateTaskRequest": "jira_watcher_create_task_request",
+  "JiraWatcher_ListTaskNamesRequest": "jira_watcher_list_task_names_request",
+  "JiraWatcher_RendererReply": "jira_watcher_renderer_reply",
   "PlanContent": "plan_content",
   "ReadPlanContent": "read_plan_content",
   "StopPlanWatcher": "stop_plan_watcher",
@@ -144,5 +147,8 @@
   "MCP_TaskHydrated": "mcp_task_hydrated",
   "MCP_StaleUrlWarning": "mcp_stale_url_warning",
   "MCP_CoordinatedTaskClosed": "mcp_coordinated_task_closed",
-  "MCP_TaskCleanupFailed": "mcp_task_cleanup_failed"
+  "MCP_TaskCleanupFailed": "mcp_task_cleanup_failed",
+  "StartJiraWatcher": "start_jira_watcher",
+  "StopJiraWatcher": "stop_jira_watcher",
+  "JiraWatcherStatus": "jira_watcher_status"
 }

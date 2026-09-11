@@ -12,9 +12,12 @@ update-test/
 .idea
 .claude
 .DS_Store
-# Keep generated docs content ignored, but track the authored architecture overview.
+# Keep generated docs content ignored, but track authored content:
+# the architecture overview, and superpowers design specs/plans.
 docs/*
 !docs/architecture-overview.html
+!docs/superpowers/
+!docs/superpowers/**
 
 # Sandbox bind-mount artifacts from user home (not project files).
 # Root-anchored so legitimate nested files with these names are still tracked.
