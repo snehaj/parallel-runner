@@ -1360,7 +1360,12 @@ Task 8 will add the actual `ipcMain.handle` entries that call `startWatchingProj
 - [ ] **Step 6: Run the full check**
 
 Run: `npm run check`
-Expected: passes.
+Expected: `startWatchingProject`/`stopWatchingProject` are imported above but not called by anything
+in this task (Task 8 is what calls them) — expect ESLint's `no-unused-vars` to fire on both names,
+same situation Task 5 hit for `jiraWatcherBridge`. Resolve it the same way: add an
+`// eslint-disable-next-line @typescript-eslint/no-unused-vars` comment above the import line,
+noting it's consumed by Task 8's `ipcMain.handle` entries. Do not remove the two names from the
+import — Task 8 needs them there. Once that's added, `npm run check` should pass.
 
 - [ ] **Step 7: Commit**
 
