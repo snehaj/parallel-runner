@@ -4,6 +4,8 @@
 
 import { ipcMain, type BrowserWindow } from 'electron';
 import { randomUUID } from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { IPC } from './channels.js';
 
 /** True if any task name in `names` contains `ticketKey` as an exact
@@ -89,4 +91,58 @@ export function initJiraWatcherBridge(win: BrowserWindow): {
         projectId,
       }).then((r) => r.names),
   };
+}
+
+const exec = promisify(execFile);
+const CLAUDE_TIMEOUT_MS = 60_000;
+const CLAUDE_MAX_BUFFER = 4 * 1024 * 1024;
+
+interface ClaudeResultPayload {
+  result?: string;
+}
+
+/** Runs one headless Claude Code turn against the atlassian MCP plugin and
+ *  parses its `result` field as JSON. `claude -p` with --output-format json
+ *  wraps the final answer in a `result` string field (itself a further
+ *  JSON-encoded value, per the prompt's own instruction to answer as JSON) —
+ *  see the CLI's documented --output-format json shape. */
+async function runClaudeJson<T>(prompt: string): Promise<T> {
+  const { stdout } = await exec(
+    'claude',
+    ['-p', prompt, '--output-format', 'json', '--permission-mode', 'dontAsk'],
+    { timeout: CLAUDE_TIMEOUT_MS, maxBuffer: CLAUDE_MAX_BUFFER },
+  );
+  const outer = JSON.parse(stdout) as ClaudeResultPayload;
+  if (typeof outer.result !== 'string') {
+    throw new Error('claude -p returned no result field');
+  }
+  return JSON.parse(outer.result) as T;
+}
+
+/** Queries Jira via the atlassian MCP plugin's JQL search for tickets in
+ *  `projectKey` carrying `label`. Returns ticket key + summary only. */
+export async function queryLabeledTickets(
+  projectKey: string,
+  label: string,
+): Promise<{ key: string; summary: string }[]> {
+  const prompt =
+    `Use the atlassian MCP plugin's JQL search tool to find tickets matching: ` +
+    `project = ${projectKey} AND labels = ${label}. ` +
+    `Reply with ONLY a JSON array of objects shaped {"key": "<ticket key>", "summary": "<summary>"}, ` +
+    `no other text.`;
+  return runClaudeJson<{ key: string; summary: string }[]>(prompt);
+}
+
+/** Removes `removeLabel` and adds `addLabel` on the given ticket, via the
+ *  atlassian MCP plugin. */
+export async function swapTicketLabel(
+  ticketKey: string,
+  removeLabel: string,
+  addLabel: string,
+): Promise<void> {
+  const prompt =
+    `Use the atlassian MCP plugin to update ticket ${ticketKey}: remove the label ` +
+    `${removeLabel} and add the label ${addLabel}. Reply with ONLY the JSON {"ok": true} ` +
+    `once done, no other text.`;
+  await runClaudeJson<{ ok: boolean }>(prompt);
 }
