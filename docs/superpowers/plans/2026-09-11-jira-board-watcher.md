@@ -729,7 +729,7 @@ In `electron/ipc/register.ts`, find the import block for `pr-checks.js` (`initPr
 import { initJiraWatcherBridge } from './jira-watcher.js';
 ```
 
-Find the `// --- PR CI status watcher ---` section (`initPrChecks(win);`). Add a call right after it (the actual full watcher wiring — polling, Jira reads — comes in Task 6; this task only wires the bridge itself so it exists and is callable):
+Find the `// --- PR CI status watcher ---` section (`initPrChecks(win);`). Add a call right after it (Task 6 adds the Jira query/label wrapper functions; the actual polling loop that wires everything together and consumes this bridge comes in Task 7 — this task only wires the bridge itself so it exists and is callable):
 
 ```typescript
 // --- Jira board watcher (task-creation bridge) ---
@@ -741,7 +741,7 @@ const jiraWatcherBridge = initJiraWatcherBridge(win);
 - [ ] **Step 6: Run the full check**
 
 Run: `npm run check`
-Expected: passes. If `no-unused-vars` fires on `jiraWatcherBridge`, add the disable comment noted above; if `noUnusedLocals` (the TS compiler option, separate from ESLint) fires instead, temporarily reference it with `void jiraWatcherBridge;` on the next line instead, and remove that line in Task 6.
+Expected: passes. If `no-unused-vars` fires on `jiraWatcherBridge`, add the disable comment noted above; if `noUnusedLocals` (the TS compiler option, separate from ESLint) fires instead, temporarily reference it with `void jiraWatcherBridge;` on the next line instead, and remove that line in Task 7.
 
 - [ ] **Step 7: Commit**
 
