@@ -1542,7 +1542,23 @@ import { IPC } from '../../electron/ipc/channels';
 export function startJiraWatcherSubscription(): () => void {
   const active = new Set<string>();
 
-  createEffect(() => {
+  // Extracted to a named function (not inlined into createEffect) and called
+  // BOTH from inside createEffect and once directly below, for the same
+  // reason src/store/pr-checks.ts's startPrChecksSubscription calls
+  // scanForBranchPrs() directly in addition to wiring it into its own
+  // createEffect: this repo's vitest.config.ts sets `environment: 'node'`
+  // with vite-plugin-solid's `{ ssr: true }`, which resolves the unmocked
+  // `solid-js` package to its server/SSR build — where createEffect's real
+  // implementation is a literal no-op (confirmed directly:
+  // node_modules/solid-js/dist/server.js has `function createEffect(fn,
+  // value) {}`). That only affects this Node-based test environment; the
+  // real Electron/browser build (electron/vite.config.electron.ts, plain
+  // `solid()`, no ssr flag) resolves to solid-js's real reactive build, so
+  // createEffect works normally in the actual running app — this direct
+  // call exists purely so this function's OWN tests (and any consumer
+  // relying on the initial sync happening) don't depend on an effect that's
+  // inert in this test harness.
+  const sync = (): void => {
     const seen = new Set<string>();
     for (const project of store.projects) {
       if (!project.jiraWatchEnabled) continue;
@@ -1562,7 +1578,10 @@ export function startJiraWatcherSubscription(): () => void {
         fireAndForget(IPC.StopJiraWatcher, { projectId });
       }
     }
-  });
+  };
+
+  createEffect(sync);
+  sync();
 
   const cleanup = (): void => {
     for (const projectId of active) {
