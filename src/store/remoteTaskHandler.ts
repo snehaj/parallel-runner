@@ -52,7 +52,12 @@ function handleGetProjects(req: RendererRequest): void {
   );
 }
 
-async function handleCreateTask(req: CreateTaskRequest): Promise<void> {
+/** Shared core for both callers of the create-task round-trip: the mobile
+ *  pairing bridge (`Remote_CreateTaskRequest`) and the Jira board watcher
+ *  (`JiraWatcher_CreateTaskRequest`). The request shape is identical; only the
+ *  reply channel differs, because main registers one `ipcMain.handle` per
+ *  reply channel and each bridge owns its own pending-request map. */
+async function createTaskForRequest(req: CreateTaskRequest, replyChannel: IPC): Promise<void> {
   try {
     const project = store.projects.find((p) => p.id === req.projectId);
     if (!project) throw new Error('Project not found');
@@ -89,10 +94,27 @@ async function handleCreateTask(req: CreateTaskRequest): Promise<void> {
       symlinkDirs,
       initialPrompt: req.prompt,
     });
-    reply(req.reqId, true, { taskId });
+    reply(req.reqId, true, { taskId }, undefined, replyChannel);
   } catch (err) {
-    reply(req.reqId, false, undefined, err instanceof Error ? err.message : String(err));
+    reply(
+      req.reqId,
+      false,
+      undefined,
+      err instanceof Error ? err.message : String(err),
+      replyChannel,
+    );
   }
+}
+
+/** Mobile pairing bridge: replies on `Remote_RendererReply`. */
+function handleCreateTask(req: CreateTaskRequest): Promise<void> {
+  return createTaskForRequest(req, IPC.Remote_RendererReply);
+}
+
+/** Jira board watcher bridge: replies on `JiraWatcher_RendererReply`, which is
+ *  where `initJiraWatcherBridge` awaits its pending create-task requests. */
+function handleJiraCreateTask(req: CreateTaskRequest): Promise<void> {
+  return createTaskForRequest(req, IPC.JiraWatcher_RendererReply);
 }
 
 /**
@@ -134,7 +156,8 @@ function handleListTaskNames(req: ListTaskNamesRequest): void {
   reply(req.reqId, true, { names }, undefined, IPC.JiraWatcher_RendererReply);
 }
 
-/** Subscribe to mobile task-creation requests. Returns an unsubscribe fn. */
+/** Subscribe to mobile task-creation requests and the Jira board watcher's own
+ *  create-task / list-task-names round-trips. Returns an unsubscribe fn. */
 export function startRemoteTaskHandlers(): () => void {
   const offProjects = window.electron.ipcRenderer.on(
     IPC.Remote_GetProjectsRequest,
@@ -166,11 +189,18 @@ export function startRemoteTaskHandlers(): () => void {
       if (data && typeof data === 'object') handleListTaskNames(data as ListTaskNamesRequest);
     },
   );
+  const offJiraCreate = window.electron.ipcRenderer.on(
+    IPC.JiraWatcher_CreateTaskRequest,
+    (data: unknown) => {
+      if (data && typeof data === 'object') void handleJiraCreateTask(data as CreateTaskRequest);
+    },
+  );
   return () => {
     offProjects();
     offCreate();
     offGetNotes();
     offSetNotes();
     offListTaskNames();
+    offJiraCreate();
   };
 }

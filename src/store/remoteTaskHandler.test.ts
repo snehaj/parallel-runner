@@ -2,8 +2,16 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { createStore } from 'solid-js/store';
 
-const { mockInvoke } = vi.hoisted(() => ({ mockInvoke: vi.fn() }));
+const { mockInvoke, mockCreateTask, mockUpdateTaskNotes } = vi.hoisted(() => ({
+  mockInvoke: vi.fn(),
+  mockCreateTask: vi.fn(),
+  mockUpdateTaskNotes: vi.fn(),
+}));
 vi.mock('../lib/ipc', () => ({ invoke: mockInvoke }));
+vi.mock('./tasks', () => ({
+  createTask: mockCreateTask,
+  updateTaskNotes: mockUpdateTaskNotes,
+}));
 
 import { setStore } from './core';
 import { IPC } from '../../electron/ipc/channels';
@@ -131,6 +139,111 @@ describe('handleListTaskNames', () => {
       ok: true,
       data: { names: [] },
       error: undefined,
+    });
+  });
+});
+
+// The Jira watcher's main-side bridge awaits its create-task reply on
+// JiraWatcher_RendererReply. If nothing subscribes to
+// JiraWatcher_CreateTaskRequest, or if the handler replies on the mobile
+// bridge's default channel, the round-trip never completes and every spawn
+// hits the bridge's 120s timeout.
+describe('handleJiraCreateTask', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockInvoke.mockResolvedValue(undefined);
+    mockCreateTask.mockResolvedValue('task-new');
+    setStore('taskOrder', []);
+    setStore('tasks', {});
+    setStore('projects', [
+      {
+        id: 'proj-1',
+        name: 'A',
+        path: '/a',
+        color: 'red',
+        // Non-git so the handler skips the GetMainBranch/GetGitignoredDirs
+        // round-trips; the reply-channel wiring is what this test covers.
+        isGitRepo: false,
+      },
+    ]);
+    setStore('availableAgents', [
+      {
+        id: 'claude',
+        name: 'Claude',
+        command: 'claude',
+        args: [],
+        resume_args: [],
+        skip_permissions_args: [],
+        description: '',
+      },
+    ]);
+    setStore('lastAgentId', 'claude');
+    mockOn.mockReturnValue(vi.fn());
+    vi.stubGlobal('window', { electron: { ipcRenderer: { on: mockOn } } });
+  });
+
+  it('subscribes to JiraWatcher_CreateTaskRequest', () => {
+    startRemoteTaskHandlers();
+    expect(listenerFor(IPC.JiraWatcher_CreateTaskRequest)).toBeDefined();
+  });
+
+  it('creates the task and replies on JiraWatcher_RendererReply', async () => {
+    startRemoteTaskHandlers();
+    const handler = listenerFor(IPC.JiraWatcher_CreateTaskRequest);
+    handler?.({
+      reqId: 'jira-req-1',
+      projectId: 'proj-1',
+      name: 'DEV_IRREG-1234: Fix the thing',
+      prompt: 'Implement DEV_IRREG-1234: Fix the thing',
+    });
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(IPC.JiraWatcher_RendererReply, {
+        reqId: 'jira-req-1',
+        ok: true,
+        data: { taskId: 'task-new' },
+        error: undefined,
+      });
+    });
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'DEV_IRREG-1234: Fix the thing',
+        projectId: 'proj-1',
+        initialPrompt: 'Implement DEV_IRREG-1234: Fix the thing',
+      }),
+    );
+    // Must NOT leak onto the mobile bridge's channel.
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      IPC.Remote_RendererReply,
+      expect.objectContaining({ reqId: 'jira-req-1' }),
+    );
+  });
+
+  it('reports failures on JiraWatcher_RendererReply too', async () => {
+    startRemoteTaskHandlers();
+    const handler = listenerFor(IPC.JiraWatcher_CreateTaskRequest);
+    handler?.({ reqId: 'jira-req-2', projectId: 'nope', name: 'X', prompt: 'y' });
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(IPC.JiraWatcher_RendererReply, {
+        reqId: 'jira-req-2',
+        ok: false,
+        data: undefined,
+        error: 'Project not found',
+      });
+    });
+  });
+
+  it('still replies on Remote_RendererReply for the mobile bridge', async () => {
+    startRemoteTaskHandlers();
+    const handler = listenerFor(IPC.Remote_CreateTaskRequest);
+    expect(handler).toBeDefined();
+    handler?.({ reqId: 'mobile-req-1', projectId: 'proj-1', name: 'M', prompt: 'p' });
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(IPC.Remote_RendererReply, {
+        reqId: 'mobile-req-1',
+        ok: true,
+        data: { taskId: 'task-new' },
+        error: undefined,
+      });
     });
   });
 });
