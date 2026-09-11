@@ -1436,7 +1436,17 @@ In `electron/ipc/channel-manifest.json`, add:
 
 Create `src/store/jira-watcher.test.ts`:
 
+This module's `startJiraWatcherSubscription` calls SolidJS's `createEffect`/
+`onCleanup`, both of which require an active reactive root — calling them
+bare (outside `createRoot`) throws or silently no-ops depending on context.
+`src/store/pr-checks.test.ts` (the file this mirrors) wraps every call to its
+own `startPrChecksSubscription()` in `createRoot((dispose) => {...})` and
+disposes the root at the end of each test, separately from calling the
+subscription's own returned cleanup function. Follow that exact pattern here
+— do not call `startJiraWatcherSubscription()` bare:
+
 ```typescript
+import { createRoot } from 'solid-js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { setStore } from './core';
 import { IPC } from '../../electron/ipc/channels';
@@ -1466,7 +1476,12 @@ describe('startJiraWatcherSubscription', () => {
       },
       { id: 'p2', name: 'B', path: '/b', color: 'blue', jiraWatchEnabled: false },
     ]);
-    const stop = startJiraWatcherSubscription();
+    let disposeRoot: (() => void) | undefined;
+    let stop: (() => void) | undefined;
+    createRoot((dispose) => {
+      disposeRoot = dispose;
+      stop = startJiraWatcherSubscription();
+    });
     expect(mockFireAndForget).toHaveBeenCalledWith(IPC.StartJiraWatcher, {
       projectId: 'p1',
       jiraProjectKey: 'DEV_IRREG',
@@ -1477,7 +1492,8 @@ describe('startJiraWatcherSubscription', () => {
       IPC.StartJiraWatcher,
       expect.objectContaining({ projectId: 'p2' }),
     );
-    stop();
+    stop?.();
+    disposeRoot?.();
   });
 
   it('sends StopJiraWatcher on cleanup for every project it started', () => {
@@ -1491,10 +1507,16 @@ describe('startJiraWatcherSubscription', () => {
         jiraProjectKey: 'DEV_IRREG',
       },
     ]);
-    const stop = startJiraWatcherSubscription();
+    let disposeRoot: (() => void) | undefined;
+    let stop: (() => void) | undefined;
+    createRoot((dispose) => {
+      disposeRoot = dispose;
+      stop = startJiraWatcherSubscription();
+    });
     mockFireAndForget.mockClear();
-    stop();
+    stop?.();
     expect(mockFireAndForget).toHaveBeenCalledWith(IPC.StopJiraWatcher, { projectId: 'p1' });
+    disposeRoot?.();
   });
 });
 ```
