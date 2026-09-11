@@ -69,6 +69,7 @@ export function updateProject(
       | 'jiraWatchEnabled'
       | 'jiraTriggerLabel'
       | 'jiraCompletedLabel'
+      | 'jiraProjectKey'
     >
   >,
 ): void {
@@ -97,6 +98,8 @@ export function updateProject(
         s.projects[idx].jiraTriggerLabel = updates.jiraTriggerLabel;
       if (Object.prototype.hasOwnProperty.call(updates, 'jiraCompletedLabel'))
         s.projects[idx].jiraCompletedLabel = updates.jiraCompletedLabel;
+      if (Object.prototype.hasOwnProperty.call(updates, 'jiraProjectKey'))
+        s.projects[idx].jiraProjectKey = updates.jiraProjectKey;
     }),
   );
 }

@@ -85,6 +85,11 @@ export interface Project {
    *  spawned for a ticket. Default 'REG_AUTOMATED_SUCC' if unset — see
    *  jira-watcher.ts's DEFAULT_COMPLETED_LABEL. */
   jiraCompletedLabel?: string;
+  /** Jira project key (e.g. 'DEV_IRREG') this project's watcher queries.
+   *  Required for the watcher to do anything useful — unset means the
+   *  watcher has nothing to query and effectively does nothing even if
+   *  jiraWatchEnabled is true. */
+  jiraProjectKey?: string;
 }
 
 export interface Agent {
