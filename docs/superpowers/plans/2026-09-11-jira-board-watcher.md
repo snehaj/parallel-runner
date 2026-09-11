@@ -736,7 +736,7 @@ Find the `// --- PR CI status watcher ---` section (`initPrChecks(win);`). Add a
 const jiraWatcherBridge = initJiraWatcherBridge(win);
 ```
 
-(`jiraWatcherBridge` will be unused until Task 6 wires the actual polling loop to it — add a `// eslint-disable-next-line @typescript-eslint/no-unused-vars` comment above this line for now if the lint step complains, and remove that comment in Task 6 once it's consumed. Check by running the lint step in the next step first — it may not complain if TypeScript's `noUnusedLocals` isn't strict about this pattern.)
+(`jiraWatcherBridge` will be unused until Task 7 wires the actual polling loop to it (Task 6 only adds the Jira query/label wrapper functions, not the loop that consumes this bridge) — add a `// eslint-disable-next-line @typescript-eslint/no-unused-vars` comment above this line for now if the lint step complains, and remove that comment in Task 7 once it's consumed. Check by running the lint step in the next step first — it may not complain if TypeScript's `noUnusedLocals` isn't strict about this pattern.)
 
 - [ ] **Step 6: Run the full check**
 
