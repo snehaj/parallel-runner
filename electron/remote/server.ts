@@ -135,7 +135,7 @@ export function toFriendlyListenError(
 ): NodeJS.ErrnoException {
   if (err.code === 'EADDRINUSE') {
     const friendly = new Error(
-      `Port ${port} is already in use — another Parallel Code instance may be running. ` +
+      `Port ${port} is already in use — another Paralell Runner instance may be running. ` +
         `Close it or free the port, then try again.`,
     ) as NodeJS.ErrnoException;
     friendly.code = 'EADDRINUSE';

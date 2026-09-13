@@ -46,7 +46,7 @@ export function ConnectScreen(props: ConnectScreenProps) {
           Not connected
         </p>
         <p style={{ 'font-size': '14px', color: '#678197', 'line-height': '1.5' }}>
-          On your computer, open Parallel Code → <strong>Connect Phone</strong>, then scan the QR
+          On your computer, open Paralell Runner → <strong>Connect Phone</strong>, then scan the QR
           code or paste the connection URL below.
         </p>
       </div>

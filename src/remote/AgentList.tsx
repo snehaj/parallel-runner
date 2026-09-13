@@ -55,7 +55,7 @@ export function AgentList(props: AgentListProps) {
         }}
       >
         <span style={{ 'font-size': '18px', 'font-weight': '600', color: '#d7e4f0' }}>
-          Parallel Code
+          Paralell Runner
         </span>
         <div style={{ display: 'flex', 'align-items': 'center', gap: '10px' }}>
           <Show when={needsInput() > 0}>

@@ -1,6 +1,6 @@
 {
-  "name": "Parallel Code",
-  "short_name": "Parallel",
+  "name": "Paralell Runner",
+  "short_name": "Paralell",
   "description": "Monitor and interact with your agent terminals from your phone.",
   "start_url": ".",
   "scope": ".",
