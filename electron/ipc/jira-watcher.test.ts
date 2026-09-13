@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { promisify } from 'util';
 
 vi.mock('electron', () => {
   const handlers = new Map<string, (event: unknown, args: unknown) => unknown>();
@@ -13,30 +12,27 @@ vi.mock('electron', () => {
   };
 });
 
-vi.mock('child_process', () => {
-  const mockExecFile = vi.fn();
-  (mockExecFile as unknown as Record<symbol, unknown>)[promisify.custom] = (
-    file: unknown,
-    args: unknown,
-    opts: unknown,
-  ): Promise<{ stdout: string; stderr: string }> =>
-    new Promise((resolve, reject) => {
-      mockExecFile(file, args, opts, (err: Error | null, stdout: string, stderr: string) => {
-        if (err) reject(err);
-        else resolve({ stdout, stderr });
-      });
-    });
-  return { execFile: mockExecFile };
-});
+vi.mock('./jira-client.js', () => ({
+  setJiraCredentials: vi.fn(),
+  hasJiraCredentials: vi.fn(() => true),
+  JiraApiError: class JiraApiError extends Error {
+    status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.name = 'JiraApiError';
+      this.status = status;
+    }
+  },
+  queryLabeledTickets: vi.fn(),
+  swapTicketLabel: vi.fn(),
+}));
 
 import { ipcMain } from 'electron';
-import { execFile } from 'child_process';
+import { queryLabeledTickets, swapTicketLabel, JiraApiError } from './jira-client.js';
 import {
   hasTicketKey,
   buildTaskName,
   initJiraWatcherBridge,
-  queryLabeledTickets,
-  swapTicketLabel,
   initJiraWatcher,
   startWatchingProject,
   stopWatchingProject,
@@ -47,18 +43,6 @@ import {
 import { IPC } from './channels.js';
 
 const flushPromises = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
-
-type ExecCb = (err: Error | null, stdout: string, stderr: string) => void;
-
-function stubClaude(handler: (args: string[], cb: ExecCb) => void): string[][] {
-  const calls: string[][] = [];
-  const impl = (_cmd: string, args: string[], _opts: unknown, cb: ExecCb) => {
-    calls.push(args);
-    handler(args, cb);
-  };
-  vi.mocked(execFile).mockImplementation(impl as unknown as typeof execFile);
-  return calls;
-}
 
 function fakeWindow(
   sent: Array<{ channel: string; payload: unknown }>,
@@ -78,9 +62,21 @@ function fakeWindow(
   } as unknown as import('electron').BrowserWindow;
 }
 
-/** Every prompt string `claude -p` was invoked with, in call order. */
-function promptsFrom(calls: string[][]): string[] {
-  return calls.map((args) => args[args.indexOf('-p') + 1]);
+function replyToLatest(
+  sent: Array<{ channel: string; payload: unknown }>,
+  channel: string,
+  data: unknown,
+): void {
+  const req = sent.filter((s) => s.channel === channel).pop();
+  if (!req) throw new Error(`no request sent on ${channel}`);
+  const replyHandler = (
+    ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+  ).__handlers.get(IPC.JiraWatcher_RendererReply);
+  replyHandler?.(null, {
+    reqId: (req.payload as { reqId: string }).reqId,
+    ok: true,
+    data,
+  });
 }
 
 describe('hasTicketKey', () => {
@@ -94,7 +90,6 @@ describe('hasTicketKey', () => {
     expect(hasTicketKey([], 'DEV_IRREG-1234')).toBe(false);
   });
   it('does not false-positive on a key that is a prefix of a different key', () => {
-    // DEV_IRREG-123 must not match a task named for DEV_IRREG-1234
     expect(hasTicketKey(['DEV_IRREG-1234: Fix the thing'], 'DEV_IRREG-123')).toBe(false);
   });
 });
@@ -154,177 +149,124 @@ describe('initJiraWatcherBridge', () => {
   });
 });
 
-describe('queryLabeledTickets', () => {
-  it('parses ticket key + summary from claude -p JSON output', async () => {
-    stubClaude((_args, cb) => {
-      cb(
-        null,
-        JSON.stringify({
-          result: JSON.stringify([
-            { key: 'DEV_IRREG-1234', summary: 'Fix the thing' },
-            { key: 'DEV_IRREG-5678', summary: 'Fix the other thing' },
-          ]),
-        }),
-        '',
-      );
-    });
-    const tickets = await queryLabeledTickets('DEV_IRREG', 'REG_AUTOMATED');
-    expect(tickets).toEqual([
-      { key: 'DEV_IRREG-1234', summary: 'Fix the thing' },
-      { key: 'DEV_IRREG-5678', summary: 'Fix the other thing' },
-    ]);
-  });
-
-  it('returns an empty array when claude reports no matching tickets', async () => {
-    stubClaude((_args, cb) => {
-      cb(null, JSON.stringify({ result: JSON.stringify([]) }), '');
-    });
-    const tickets = await queryLabeledTickets('DEV_IRREG', 'REG_AUTOMATED');
-    expect(tickets).toEqual([]);
-  });
-
-  it('throws if claude -p exits non-zero', async () => {
-    stubClaude((_args, cb) => {
-      cb(Object.assign(new Error('claude failed'), { code: 1 }), '', 'some error');
-    });
-    await expect(queryLabeledTickets('DEV_IRREG', 'REG_AUTOMATED')).rejects.toThrow();
-  });
-});
-
-describe('swapTicketLabel', () => {
-  it('invokes claude -p with both the remove and add label instructions', async () => {
-    const calls = stubClaude((_args, cb) => {
-      cb(null, JSON.stringify({ result: JSON.stringify({ ok: true }) }), '');
-    });
-    await swapTicketLabel('DEV_IRREG-1234', 'REG_AUTOMATED', 'REG_AUTOMATED_SUCC');
-    expect(calls).toHaveLength(1);
-    const promptArg = calls[0].find((a) => a.includes('DEV_IRREG-1234'));
-    expect(promptArg).toContain('REG_AUTOMATED');
-    expect(promptArg).toContain('REG_AUTOMATED_SUCC');
-  });
-});
-
 describe('watcher tick', () => {
   beforeEach(() => {
     __resetJiraWatcherForTests();
+    vi.mocked(queryLabeledTickets).mockReset();
+    vi.mocked(swapTicketLabel).mockReset();
   });
 
   it('spawns a task for a newly labeled ticket, then swaps its label', async () => {
-    stubClaude((args, cb) => {
-      const promptArg =
-        args.find((a) => a.includes('JQL')) ?? args.find((a) => a.includes('labels'));
-      if (promptArg) {
-        cb(
-          null,
-          JSON.stringify({
-            result: JSON.stringify([{ key: 'DEV_IRREG-1234', summary: 'Fix the thing' }]),
-          }),
-          '',
-        );
-      } else {
-        cb(null, JSON.stringify({ result: JSON.stringify({ ok: true }) }), '');
-      }
-    });
+    vi.mocked(queryLabeledTickets).mockResolvedValue([
+      { key: 'DEV_IRREG-1234', summary: 'Fix the thing' },
+    ]);
+    vi.mocked(swapTicketLabel).mockResolvedValue(undefined);
 
     const sent: Array<{ channel: string; payload: unknown }> = [];
     const win = fakeWindow(sent);
     initJiraWatcher(win);
     startWatchingProject({
       id: 'proj-1',
+      jiraProjectKey: 'DEV_IRREG',
       jiraTriggerLabel: 'REG_AUTOMATED',
       jiraCompletedLabel: 'REG_AUTOMATED_SUCC',
     });
 
-    // Respond to the listTaskNames round-trip (empty — no existing task yet)
-    // and the createTask round-trip, both sent to the fake window.
     await flushPromises();
-    const listReq = sent.find((s) => s.channel === IPC.JiraWatcher_ListTaskNamesRequest);
-    expect(listReq).toBeDefined();
-    const replyHandler = (
-      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
-    ).__handlers.get(IPC.JiraWatcher_RendererReply);
-    replyHandler?.(null, {
-      reqId: ((listReq as { payload: unknown }).payload as { reqId: string }).reqId,
-      ok: true,
-      data: { names: [] },
-    });
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
 
     await flushPromises();
-    const createReq = sent.find((s) => s.channel === IPC.JiraWatcher_CreateTaskRequest);
+    const createReq = sent.filter((s) => s.channel === IPC.JiraWatcher_CreateTaskRequest).pop();
     expect(createReq).toBeDefined();
-    expect(((createReq as { payload: unknown }).payload as { name: string }).name).toBe(
-      'DEV_IRREG-1234: Fix the thing',
-    );
-    replyHandler?.(null, {
-      reqId: ((createReq as { payload: unknown }).payload as { reqId: string }).reqId,
-      ok: true,
-      data: { taskId: 'task-999' },
-    });
+    expect((createReq?.payload as { name: string }).name).toBe('DEV_IRREG-1234: Fix the thing');
+    replyToLatest(sent, IPC.JiraWatcher_CreateTaskRequest, { taskId: 'task-999' });
 
     await flushPromises();
+    expect(swapTicketLabel).toHaveBeenCalledWith(
+      'DEV_IRREG-1234',
+      'REG_AUTOMATED',
+      'REG_AUTOMATED_SUCC',
+    );
     stopWatchingProject('proj-1');
   });
 
   it('skips a ticket that already has a matching task name', async () => {
-    stubClaude((args, cb) => {
-      const promptArg = args.find((a) => a.includes('labels'));
-      if (promptArg) {
-        cb(
-          null,
-          JSON.stringify({
-            result: JSON.stringify([{ key: 'DEV_IRREG-1234', summary: 'Fix the thing' }]),
-          }),
-          '',
-        );
-      }
-    });
+    vi.mocked(queryLabeledTickets).mockResolvedValue([
+      { key: 'DEV_IRREG-1234', summary: 'Fix the thing' },
+    ]);
 
-    const sent: Array<{ channel: string; payload: unknown }> = [];
-    const win = fakeWindow(sent);
-    initJiraWatcher(win);
-    startWatchingProject({ id: 'proj-1' });
-
-    await flushPromises();
-    const listReq = sent.find((s) => s.channel === IPC.JiraWatcher_ListTaskNamesRequest);
-    const replyHandler = (
-      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
-    ).__handlers.get(IPC.JiraWatcher_RendererReply);
-    replyHandler?.(null, {
-      reqId: ((listReq as { payload: unknown }).payload as { reqId: string }).reqId,
-      ok: true,
-      data: { names: ['DEV_IRREG-1234: Fix the thing'] },
-    });
-
-    await flushPromises();
-    const createReq = sent.find((s) => s.channel === IPC.JiraWatcher_CreateTaskRequest);
-    expect(createReq).toBeUndefined();
-    stopWatchingProject('proj-1');
-  });
-
-  it('disables the watcher when claude binary is missing', async () => {
-    stubClaude((_args, cb) => {
-      cb(Object.assign(new Error('not found'), { code: 'ENOENT' }), '', '');
-    });
-    const win = fakeWindow([]);
-    initJiraWatcher(win);
-    startWatchingProject({ id: 'proj-1' });
-    await flushPromises();
-    const state = getJiraWatcherStateForTests();
-    expect(state.disabled).toBe(true);
-    expect(state.disabledReason).toBe('missing');
-    stopWatchingProject('proj-1');
-  });
-
-  it('pushes JiraWatcherStatus on start and again when the watcher becomes disabled', async () => {
-    stubClaude((_args, cb) => {
-      cb(Object.assign(new Error('not found'), { code: 'ENOENT' }), '', '');
-    });
     const sent: Array<{ channel: string; payload: unknown }> = [];
     const win = fakeWindow(sent);
     initJiraWatcher(win);
     startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
 
-    // Initial state, sent synchronously so the renderer isn't blank.
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, {
+      names: ['DEV_IRREG-1234: Fix the thing'],
+    });
+
+    await flushPromises();
+    expect(sent.some((s) => s.channel === IPC.JiraWatcher_CreateTaskRequest)).toBe(false);
+    stopWatchingProject('proj-1');
+  });
+
+  it('disables the watcher with reason no-credentials on a status-0 JiraApiError', async () => {
+    vi.mocked(queryLabeledTickets).mockRejectedValue(
+      new JiraApiError(0, 'Jira credentials are not set'),
+    );
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    const state = getJiraWatcherStateForTests();
+    expect(state.disabled).toBe(true);
+    expect(state.disabledReason).toBe('no-credentials');
+    stopWatchingProject('proj-1');
+  });
+
+  it('disables the watcher with reason auth on a 401 JiraApiError', async () => {
+    vi.mocked(queryLabeledTickets).mockRejectedValue(new JiraApiError(401, 'Unauthorized'));
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    const state = getJiraWatcherStateForTests();
+    expect(state.disabled).toBe(true);
+    expect(state.disabledReason).toBe('auth');
+    stopWatchingProject('proj-1');
+  });
+
+  it('disables the watcher with reason auth on a 403 JiraApiError', async () => {
+    vi.mocked(queryLabeledTickets).mockRejectedValue(new JiraApiError(403, 'Forbidden'));
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    expect(getJiraWatcherStateForTests().disabledReason).toBe('auth');
+    stopWatchingProject('proj-1');
+  });
+
+  it('logs and stays enabled on any other error (transient)', async () => {
+    vi.mocked(queryLabeledTickets).mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    vi.mocked(queryLabeledTickets).mockResolvedValueOnce([]);
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    expect(getJiraWatcherStateForTests().disabled).toBe(false);
+
+    await __runJiraTickForTests();
+    expect(queryLabeledTickets).toHaveBeenCalledTimes(2);
+    stopWatchingProject('proj-1');
+  });
+
+  it('pushes JiraWatcherStatus on start and again when the watcher becomes disabled', async () => {
+    vi.mocked(queryLabeledTickets).mockRejectedValue(new JiraApiError(401, 'Unauthorized'));
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+
     const initial = sent.filter((s) => s.channel === IPC.JiraWatcherStatus);
     expect(initial).toHaveLength(1);
     expect(initial[0].payload).toEqual({ disabled: false, disabledReason: null });
@@ -333,54 +275,47 @@ describe('watcher tick', () => {
     const statuses = sent.filter((s) => s.channel === IPC.JiraWatcherStatus);
     expect(statuses[statuses.length - 1]?.payload).toEqual({
       disabled: true,
-      disabledReason: 'missing',
+      disabledReason: 'auth',
     });
     stopWatchingProject('proj-1');
   });
 
   // Regression: the project key used to be threaded as a per-call argument
   // that only the one-shot poll in startWatchingProject supplied, so every
-  // scheduled tick queried `project =  AND labels = ...` with an empty key.
+  // scheduled tick queried with an empty key.
   it('queries with the configured jiraProjectKey on a SECOND (scheduled) tick', async () => {
-    const calls = stubClaude((_args, cb) => {
-      cb(null, JSON.stringify({ result: JSON.stringify([]) }), '');
-    });
+    vi.mocked(queryLabeledTickets).mockResolvedValue([]);
 
     const win = fakeWindow([]);
     initJiraWatcher(win);
     startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
     await flushPromises();
-    expect(promptsFrom(calls)).toHaveLength(1);
+    expect(queryLabeledTickets).toHaveBeenCalledTimes(1);
+    expect(queryLabeledTickets).toHaveBeenLastCalledWith('DEV_IRREG', 'REG_AUTOMATED');
 
     await __runJiraTickForTests();
-    const prompts = promptsFrom(calls);
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain('project = DEV_IRREG');
-    expect(prompts[1]).not.toContain('project =  AND');
+    expect(queryLabeledTickets).toHaveBeenCalledTimes(2);
+    expect(queryLabeledTickets).toHaveBeenLastCalledWith('DEV_IRREG', 'REG_AUTOMATED');
     stopWatchingProject('proj-1');
   });
 
   it('fires an immediate tick on window show and restore, not just on the interval', async () => {
-    const calls = stubClaude((_args, cb) => {
-      cb(null, JSON.stringify({ result: JSON.stringify([]) }), '');
-    });
+    vi.mocked(queryLabeledTickets).mockResolvedValue([]);
 
     const windowEvents = new Map<string, () => void>();
     const win = fakeWindow([], windowEvents);
     initJiraWatcher(win);
     startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
     await flushPromises();
-    expect(calls).toHaveLength(1);
+    expect(queryLabeledTickets).toHaveBeenCalledTimes(1);
 
     windowEvents.get('show')?.();
     await flushPromises();
-    expect(calls).toHaveLength(2);
+    expect(queryLabeledTickets).toHaveBeenCalledTimes(2);
 
     windowEvents.get('restore')?.();
     await flushPromises();
-    expect(calls).toHaveLength(3);
-    const prompts = promptsFrom(calls);
-    expect(prompts[prompts.length - 1]).toContain('project = DEV_IRREG');
+    expect(queryLabeledTickets).toHaveBeenCalledTimes(3);
     stopWatchingProject('proj-1');
   });
 });

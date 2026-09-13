@@ -141,12 +141,12 @@ export interface BranchPrDetectionResult {
 
 /** Pushed main→renderer on IPC.JiraWatcherStatus whenever the Jira board
  *  watcher's availability changes, plus once when a project starts being
- *  watched so the renderer has an initial state. `disabledReason` mirrors
- *  pr-checks.ts's taxonomy: 'missing' = claude CLI not found, 'auth' = Claude
- *  Code not authenticated. */
+ *  watched so the renderer has an initial state. 'no-credentials' = no Jira
+ *  email/token configured in Settings, 'auth' = Jira rejected the
+ *  credentials (401/403). */
 export interface JiraWatcherStatusPayload {
   disabled: boolean;
-  disabledReason: 'missing' | 'auth' | null;
+  disabledReason: 'no-credentials' | 'auth' | null;
 }
 
 export interface EslintQualityFinding {

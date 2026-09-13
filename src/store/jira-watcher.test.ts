@@ -115,10 +115,10 @@ describe('jiraWatcherStatus', () => {
 
     listener?.({ disabled: true, disabledReason: 'auth' });
     expect(jiraWatcherStatus()).toEqual({ disabled: true, disabledReason: 'auth' });
-    expect(jiraWatcherStatusLabel()).toBe('Disabled: Claude Code not authenticated');
+    expect(jiraWatcherStatusLabel()).toBe('Disabled: Jira rejected the credentials');
 
-    listener?.({ disabled: true, disabledReason: 'missing' });
-    expect(jiraWatcherStatusLabel()).toBe('Disabled: claude CLI not found');
+    listener?.({ disabled: true, disabledReason: 'no-credentials' });
+    expect(jiraWatcherStatusLabel()).toBe('Disabled: Jira credentials not set');
 
     listener?.({ disabled: false, disabledReason: null });
     expect(jiraWatcherStatus()).toEqual({ disabled: false, disabledReason: null });

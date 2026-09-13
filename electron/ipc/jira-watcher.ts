@@ -1,12 +1,12 @@
 // Per-project Jira board watcher. Polls each opted-in project for tickets
 // labeled REG_AUTOMATED and spawns a real Parallel Code task for each one.
-// See docs/superpowers/specs/2026-09-11-jira-board-watcher-design.md.
+// See docs/superpowers/specs/2026-09-11-jira-board-watcher-design.md and
+// docs/superpowers/specs/2026-09-14-jira-watcher-rest-rewrite-design.md.
 
 import { ipcMain, type BrowserWindow } from 'electron';
 import { randomUUID } from 'crypto';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { IPC } from './channels.js';
+import { queryLabeledTickets, swapTicketLabel, JiraApiError } from './jira-client.js';
 import type { JiraWatcherStatusPayload } from './shared-types.js';
 
 /** True if any task name in `names` contains `ticketKey` as an exact
@@ -94,60 +94,6 @@ export function initJiraWatcherBridge(win: BrowserWindow): {
   };
 }
 
-const exec = promisify(execFile);
-const CLAUDE_TIMEOUT_MS = 60_000;
-const CLAUDE_MAX_BUFFER = 4 * 1024 * 1024;
-
-interface ClaudeResultPayload {
-  result?: string;
-}
-
-/** Runs one headless Claude Code turn against the atlassian MCP plugin and
- *  parses its `result` field as JSON. `claude -p` with --output-format json
- *  wraps the final answer in a `result` string field (itself a further
- *  JSON-encoded value, per the prompt's own instruction to answer as JSON) —
- *  see the CLI's documented --output-format json shape. */
-async function runClaudeJson<T>(prompt: string): Promise<T> {
-  const { stdout } = await exec(
-    'claude',
-    ['-p', prompt, '--output-format', 'json', '--permission-mode', 'dontAsk'],
-    { timeout: CLAUDE_TIMEOUT_MS, maxBuffer: CLAUDE_MAX_BUFFER },
-  );
-  const outer = JSON.parse(stdout) as ClaudeResultPayload;
-  if (typeof outer.result !== 'string') {
-    throw new Error('claude -p returned no result field');
-  }
-  return JSON.parse(outer.result) as T;
-}
-
-/** Queries Jira via the atlassian MCP plugin's JQL search for tickets in
- *  `projectKey` carrying `label`. Returns ticket key + summary only. */
-export async function queryLabeledTickets(
-  projectKey: string,
-  label: string,
-): Promise<{ key: string; summary: string }[]> {
-  const prompt =
-    `Use the atlassian MCP plugin's JQL search tool to find tickets matching: ` +
-    `project = ${projectKey} AND labels = ${label}. ` +
-    `Reply with ONLY a JSON array of objects shaped {"key": "<ticket key>", "summary": "<summary>"}, ` +
-    `no other text.`;
-  return runClaudeJson<{ key: string; summary: string }[]>(prompt);
-}
-
-/** Removes `removeLabel` and adds `addLabel` on the given ticket, via the
- *  atlassian MCP plugin. */
-export async function swapTicketLabel(
-  ticketKey: string,
-  removeLabel: string,
-  addLabel: string,
-): Promise<void> {
-  const prompt =
-    `Use the atlassian MCP plugin to update ticket ${ticketKey}: remove the label ` +
-    `${removeLabel} and add the label ${addLabel}. Reply with ONLY the JSON {"ok": true} ` +
-    `once done, no other text.`;
-  await runClaudeJson<{ ok: boolean }>(prompt);
-}
-
 const TICK_MS = 3 * 60_000; // 3 minutes — Jira polling has no reason to match pr-checks.ts's 30s
 const DEFAULT_TRIGGER_LABEL = 'REG_AUTOMATED';
 const DEFAULT_COMPLETED_LABEL = 'REG_AUTOMATED_SUCC';
@@ -168,7 +114,7 @@ let watched = new Map<string, WatchedProject>();
 let jiraTickHandle: ReturnType<typeof setInterval> | null = null;
 let jiraIsPolling = false;
 let jiraDisabled = false;
-let jiraDisabledReason: 'missing' | 'auth' | null = null;
+let jiraDisabledReason: 'no-credentials' | 'auth' | null = null;
 
 /** Public: wire window-lifecycle listeners and create the task-creation
  *  bridge. Call once from registerAllHandlers, same as initPrChecks. */
@@ -260,7 +206,7 @@ async function runJiraTick(): Promise<void> {
   jiraIsPolling = true;
   try {
     await Promise.all(
-      Array.from(watched.keys()).map((id) => pollOneProject(id).catch(handleClaudeError)),
+      Array.from(watched.keys()).map((id) => pollOneProject(id).catch(handleJiraError)),
     );
   } finally {
     jiraIsPolling = false;
@@ -275,7 +221,7 @@ async function pollOneProject(projectId: string): Promise<void> {
   try {
     tickets = await queryLabeledTickets(entry.jiraProjectKey, entry.triggerLabel);
   } catch (err) {
-    handleClaudeError(err);
+    handleJiraError(err);
     return;
   }
 
@@ -311,27 +257,29 @@ async function pollOneProject(projectId: string): Promise<void> {
   }
 }
 
-function handleClaudeError(err: unknown): void {
+function handleJiraError(err: unknown): void {
   if (jiraDisabled) return;
-  const code = (err as NodeJS.ErrnoException)?.code;
-  if (code === 'ENOENT') {
-    jiraDisabled = true;
-    jiraDisabledReason = 'missing';
-    console.warn('[jira-watcher] claude CLI not found — Jira watcher disabled for this session');
-    clearJiraTickInterval();
-    sendJiraStatus();
-    return;
-  }
-  const stderr = (err as { stderr?: string })?.stderr ?? '';
-  if (typeof stderr === 'string' && /not logged into|authentication required/i.test(stderr)) {
-    jiraDisabled = true;
-    jiraDisabledReason = 'auth';
-    console.warn(
-      '[jira-watcher] claude not authenticated — Jira watcher disabled for this session',
-    );
-    clearJiraTickInterval();
-    sendJiraStatus();
-    return;
+  if (err instanceof JiraApiError) {
+    if (err.status === 0) {
+      jiraDisabled = true;
+      jiraDisabledReason = 'no-credentials';
+      console.warn(
+        '[jira-watcher] no Jira credentials configured — watcher disabled for this session',
+      );
+      clearJiraTickInterval();
+      sendJiraStatus();
+      return;
+    }
+    if (err.status === 401 || err.status === 403) {
+      jiraDisabled = true;
+      jiraDisabledReason = 'auth';
+      console.warn(
+        '[jira-watcher] Jira rejected the credentials — watcher disabled for this session',
+      );
+      clearJiraTickInterval();
+      sendJiraStatus();
+      return;
+    }
   }
   console.warn('[jira-watcher] transient failure:', (err as Error)?.message ?? err);
 }
@@ -357,7 +305,7 @@ export function __runJiraTickForTests(): Promise<void> {
 
 export function getJiraWatcherStateForTests(): {
   disabled: boolean;
-  disabledReason: 'missing' | 'auth' | null;
+  disabledReason: 'no-credentials' | 'auth' | null;
   watchedProjectIds: string[];
 } {
   return {

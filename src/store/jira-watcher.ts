@@ -10,7 +10,7 @@ interface WatchedSettings {
   jiraCompletedLabel?: string;
 }
 
-export type JiraWatcherDisabledReason = 'missing' | 'auth';
+export type JiraWatcherDisabledReason = 'no-credentials' | 'auth';
 
 const [jiraWatcherStatus, setJiraWatcherStatus] = createSignal<{
   disabled: boolean;
@@ -26,8 +26,8 @@ export { jiraWatcherStatus };
 export function jiraWatcherStatusLabel(): string {
   const status = jiraWatcherStatus();
   if (!status.disabled) return 'Watching';
-  if (status.disabledReason === 'auth') return 'Disabled: Claude Code not authenticated';
-  if (status.disabledReason === 'missing') return 'Disabled: claude CLI not found';
+  if (status.disabledReason === 'auth') return 'Disabled: Jira rejected the credentials';
+  if (status.disabledReason === 'no-credentials') return 'Disabled: Jira credentials not set';
   return 'Disabled';
 }
 
@@ -85,7 +85,7 @@ export function startJiraWatcherSubscription(): () => void {
     setJiraWatcherStatus({
       disabled: msg.disabled,
       disabledReason:
-        msg.disabledReason === 'missing' || msg.disabledReason === 'auth'
+        msg.disabledReason === 'no-credentials' || msg.disabledReason === 'auth'
           ? msg.disabledReason
           : null,
     });
