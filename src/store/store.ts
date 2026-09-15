@@ -146,6 +146,8 @@ export {
   setShareDockerAgentAuth,
   setAskCodeProvider,
   setMinimaxApiKey,
+  setJiraEmail,
+  setJiraToken,
   setWindowState,
   setCoordinatorModeEnabled,
   setDefaultStepsEnabled,

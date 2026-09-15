@@ -247,6 +247,27 @@ export function setMinimaxApiKey(key: string): void {
   );
 }
 
+// Local buffers so either Jira field's onInput can send both values together
+// -- the main process always expects {email, token} as a pair (there's no
+// separate "set just the email" IPC call). Memory-only, same as the values
+// they forward to jira-client.ts's own memory-only storage.
+let jiraEmailBuffer = '';
+let jiraTokenBuffer = '';
+
+export function setJiraEmail(email: string): void {
+  jiraEmailBuffer = email.trim();
+  invoke(IPC.SetJiraCredentials, { email: jiraEmailBuffer, token: jiraTokenBuffer }).catch((e) =>
+    console.warn('Failed to set Jira credentials:', e),
+  );
+}
+
+export function setJiraToken(token: string): void {
+  jiraTokenBuffer = token.trim();
+  invoke(IPC.SetJiraCredentials, { email: jiraEmailBuffer, token: jiraTokenBuffer }).catch((e) =>
+    console.warn('Failed to set Jira credentials:', e),
+  );
+}
+
 export function setDockerAvailable(available: boolean): void {
   setStore('dockerAvailable', available);
 }

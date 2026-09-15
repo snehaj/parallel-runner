@@ -38,6 +38,7 @@ import {
   isPrUrl,
 } from './pr-checks.js';
 import { initJiraWatcher, startWatchingProject, stopWatchingProject } from './jira-watcher.js';
+import { setJiraCredentials } from './jira-client.js';
 import { readCoverageSummary } from './coverage.js';
 import { loadEslintQualityFindings } from './eslint-quality-findings.js';
 import { startRemoteServer, getMCPLogs, type RemoteProject } from '../remote/server.js';
@@ -902,6 +903,11 @@ export function registerAllHandlers(win: BrowserWindow): void {
   ipcMain.handle(IPC.StopJiraWatcher, (_e, args) => {
     assertString(args.projectId, 'projectId');
     stopWatchingProject(args.projectId);
+  });
+  ipcMain.handle(IPC.SetJiraCredentials, (_e, args) => {
+    assertString(args.email, 'email');
+    assertString(args.token, 'token');
+    setJiraCredentials(args.email, args.token);
   });
 
   // --- Local ESLint quality findings ---

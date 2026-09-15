@@ -99,6 +99,7 @@ const ALLOWED_CHANNELS = new Set([
   'ask_about_code',
   'cancel_ask_about_code',
   'set_minimax_api_key',
+  'set_jira_credentials',
   'check_docker_available',
   'check_docker_image_exists',
   'build_docker_image',

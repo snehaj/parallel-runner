@@ -31,6 +31,8 @@ import {
   setShareDockerAgentAuth,
   setAskCodeProvider,
   setMinimaxApiKey,
+  setJiraEmail,
+  setJiraToken,
   setAppearanceMode,
   setLightTheme,
   setDarkTheme,
@@ -645,6 +647,91 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   : 'Uses the claude CLI to answer questions about selected code. Requires Claude Code to be installed.'}
               </span>
             </div>
+          </div>
+
+          <div style={{ display: 'flex', 'flex-direction': 'column', gap: '10px' }}>
+            <div
+              style={{
+                ...sectionLabelStyle,
+                'font-weight': '600',
+              }}
+            >
+              Jira
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                'flex-direction': 'column',
+                gap: '6px',
+                padding: '8px 12px',
+                'border-radius': '8px',
+                background: theme.bgInput,
+                border: `1px solid ${theme.border}`,
+              }}
+            >
+              <label
+                style={{
+                  display: 'flex',
+                  'align-items': 'center',
+                  gap: '10px',
+                }}
+              >
+                <span style={{ 'font-size': '13px', color: theme.fg, 'white-space': 'nowrap' }}>
+                  Email
+                </span>
+                <input
+                  type="text"
+                  onInput={(e) => setJiraEmail(e.currentTarget.value)}
+                  placeholder="you@company.com"
+                  style={{
+                    flex: '1',
+                    background: theme.taskPanelBg,
+                    border: `1px solid ${theme.border}`,
+                    'border-radius': '6px',
+                    padding: '6px 10px',
+                    color: theme.fg,
+                    'font-size': '13px',
+                    'font-family': "'JetBrains Mono', monospace",
+                    outline: 'none',
+                  }}
+                />
+              </label>
+              <label
+                style={{
+                  display: 'flex',
+                  'align-items': 'center',
+                  gap: '10px',
+                }}
+              >
+                <span style={{ 'font-size': '13px', color: theme.fg, 'white-space': 'nowrap' }}>
+                  API token
+                </span>
+                <input
+                  type="password"
+                  onInput={(e) => setJiraToken(e.currentTarget.value)}
+                  placeholder="Enter your Jira API token (stored in memory only)"
+                  style={{
+                    flex: '1',
+                    background: theme.taskPanelBg,
+                    border: `1px solid ${theme.border}`,
+                    'border-radius': '6px',
+                    padding: '6px 10px',
+                    color: theme.fg,
+                    'font-size': '13px',
+                    'font-family': "'JetBrains Mono', monospace",
+                    outline: 'none',
+                  }}
+                />
+              </label>
+            </div>
+            <span style={{ 'font-size': '11px', color: theme.fgSubtle }}>
+              Used by the Jira board watcher (enabled per-project in Edit Project) to poll for
+              labeled tickets. Create a token at{' '}
+              <code style={{ 'font-family': "'JetBrains Mono', monospace", 'font-size': '11px' }}>
+                id.atlassian.com/manage-profile/security/api-tokens
+              </code>
+              .
+            </span>
           </div>
 
           <Show when={store.dockerAvailable}>
