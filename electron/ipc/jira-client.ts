@@ -9,6 +9,15 @@
 // See docs/superpowers/specs/2026-09-14-jira-watcher-rest-rewrite-design.md.
 
 const JIRA_BASE_URL = 'https://eqsgroupcloud.atlassian.net';
+// eqsgroupcloud.atlassian.net rejects HTTP Basic auth outright (confirmed via a
+// direct curl -v: 401 with `www-authenticate: OAuth realm="https%3A%2F%2Feqs...`)
+// -- Basic auth below only ever works with a scoped/OAuth-derived token, never a
+// personal API token from id.atlassian.com. A scoped token is prefixed ATSTT or
+// ATOA and must instead use Bearer auth against this cloudId-scoped base, per
+// ai/foundry's own jira_curl (docs/superpowers/specs/2026-09-14-jira-watcher-rest-rewrite-design.md).
+const JIRA_CLOUD_API_BASE =
+  'https://api.atlassian.com/ex/jira/ac99ec2c-4be5-4e97-a8f6-cf12bf3e46ce';
+const SCOPED_TOKEN_PREFIXES = ['ATSTT', 'ATOA'];
 
 /** Main-process storage for Jira credentials. Never sent back to the
  *  renderer, never persisted -- same pattern as ask-code-minimax.ts's
@@ -38,15 +47,24 @@ export class JiraApiError extends Error {
   }
 }
 
+function isScopedToken(): boolean {
+  return SCOPED_TOKEN_PREFIXES.some((prefix) => jiraToken.startsWith(prefix));
+}
+
 function authHeader(): string {
+  if (isScopedToken()) return `Bearer ${jiraToken}`;
   return 'Basic ' + Buffer.from(`${jiraEmail}:${jiraToken}`).toString('base64');
+}
+
+function baseUrl(): string {
+  return isScopedToken() ? JIRA_CLOUD_API_BASE : JIRA_BASE_URL;
 }
 
 async function jiraFetch(path: string, init: RequestInit = {}): Promise<unknown> {
   if (!hasJiraCredentials()) {
     throw new JiraApiError(0, 'Jira credentials are not set');
   }
-  const res = await fetch(`${JIRA_BASE_URL}${path}`, {
+  const res = await fetch(`${baseUrl()}${path}`, {
     ...init,
     headers: {
       ...init.headers,

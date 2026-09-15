@@ -48,9 +48,24 @@ talks to the Jira REST API directly with `curl`+`jq`:
   turn.
 
 This design ports that pattern into the desktop watcher: replace the one
-LLM-mediated call with two deterministic REST calls, using Basic auth (the
-credential here will be a personal Atlassian API token, `ATATT...` prefix —
-not a scoped service token, so the Bearer branch does not apply).
+LLM-mediated call with two deterministic REST calls.
+
+**Correction (2026-09-15), verified against the real server:** the original
+version of this section assumed a personal Atlassian API token (`ATATT...`
+prefix) and Basic auth only. That assumption was wrong.
+`eqsgroupcloud.atlassian.net` rejects HTTP Basic auth outright — confirmed via
+`curl -v` with two independently-generated `ATATT...` tokens and the correct
+account email, both returning 401 with
+`www-authenticate: OAuth realm="https%3A%2F%2Feqsgroupcloud.atlassian.net"`.
+This is a site-level policy, not a credential mistake. The implementation
+therefore includes BOTH of Foundry's branches after all: Basic auth (kept for
+any Jira site that does accept it) and Bearer auth against
+`https://api.atlassian.com/ex/jira/ac99ec2c-4be5-4e97-a8f6-cf12bf3e46ce/...`
+for a token prefixed `ATSTT`/`ATOA` — which is the one that actually works
+against this site. An `ATSTT`/`ATOA` token is not obtainable from the
+self-service "Create API token" page; it must come from whoever provisions
+Jira service-account credentials at EQS (see project memory
+`foundry_headless_jira_pattern` for the full finding).
 
 ## Scope
 

@@ -78,6 +78,35 @@ describe('queryLabeledTickets', () => {
     });
   });
 
+  it('uses Bearer auth against api.atlassian.com/ex/jira/<cloudId>/... for a scoped (ATSTT-prefixed) token', async () => {
+    setJiraCredentials('me@example.com', 'ATSTT3xFakeScopedToken');
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ issues: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await queryLabeledTickets('DEV_IRREG', 'REG_AUTOMATED');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      'https://api.atlassian.com/ex/jira/ac99ec2c-4be5-4e97-a8f6-cf12bf3e46ce/rest/api/3/search/jql',
+    );
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      'Bearer ATSTT3xFakeScopedToken',
+    );
+  });
+
+  it('uses Bearer auth for an ATOA-prefixed token too', async () => {
+    setJiraCredentials('me@example.com', 'ATOA3xFakeOAuthToken');
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ issues: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await queryLabeledTickets('DEV_IRREG', 'REG_AUTOMATED');
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      'Bearer ATOA3xFakeOAuthToken',
+    );
+  });
+
   it('throws JiraApiError with status 0 when credentials are not set', async () => {
     setJiraCredentials('', '');
     const fetchMock = vi.fn();
@@ -134,5 +163,28 @@ describe('swapTicketLabel', () => {
     const [, putInit] = fetchMock.mock.calls[1] as [string, RequestInit];
     const body = JSON.parse(putInit.body as string) as { fields: { labels: string[] } };
     expect(body.fields.labels).toEqual(['REG_AUTOMATED_SUCC']);
+  });
+
+  it('uses the api.atlassian.com/ex/jira/<cloudId>/... base with Bearer auth for a scoped token', async () => {
+    setJiraCredentials('me@example.com', 'ATSTT3xFakeScopedToken');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ fields: { labels: ['REG_AUTOMATED'] } }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await swapTicketLabel('DEV_IRREG-1234', 'REG_AUTOMATED', 'REG_AUTOMATED_SUCC');
+
+    const [getUrl, getInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(getUrl).toBe(
+      'https://api.atlassian.com/ex/jira/ac99ec2c-4be5-4e97-a8f6-cf12bf3e46ce/rest/api/3/issue/DEV_IRREG-1234?fields=labels',
+    );
+    expect((getInit.headers as Record<string, string>).Authorization).toBe(
+      'Bearer ATSTT3xFakeScopedToken',
+    );
+    const [putUrl] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(putUrl).toBe(
+      'https://api.atlassian.com/ex/jira/ac99ec2c-4be5-4e97-a8f6-cf12bf3e46ce/rest/api/3/issue/DEV_IRREG-1234',
+    );
   });
 });
