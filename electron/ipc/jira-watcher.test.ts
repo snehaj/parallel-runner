@@ -38,6 +38,7 @@ import {
   stopWatchingProject,
   triggerJiraCheckNow,
   getJiraWatcherStateForTests,
+  getProjectQueueStateForTests,
   __resetJiraWatcherForTests,
   __runJiraTickForTests,
 } from './jira-watcher.js';
@@ -544,5 +545,31 @@ describe('triggerJiraCheckNow', () => {
     resolveQuery?.([]);
     await Promise.all([first, second]);
     stopWatchingProject('proj-1');
+  });
+});
+
+describe('ProjectQueue lifecycle', () => {
+  beforeEach(() => {
+    __resetJiraWatcherForTests();
+  });
+
+  it('has no queue entry for a project that was never started', () => {
+    expect(getProjectQueueStateForTests('proj-1')).toBeUndefined();
+  });
+
+  it('creates an empty implementQueue when a project starts watching', () => {
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    expect(getProjectQueueStateForTests('proj-1')).toEqual({ implementQueue: [] });
+    stopWatchingProject('proj-1');
+  });
+
+  it('clears the queue entry when the project stops watching', () => {
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    stopWatchingProject('proj-1');
+    expect(getProjectQueueStateForTests('proj-1')).toBeUndefined();
   });
 });

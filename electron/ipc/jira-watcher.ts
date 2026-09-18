@@ -137,9 +137,37 @@ interface WatchedProject {
   completedLabel: string;
 }
 
+interface ProjectQueue {
+  /** Ticket keys waiting for the Implementer window, FIFO. Does not include
+   *  the ticket currently being worked -- that one has already been dequeued
+   *  and handed to myl3 via promptAgent; this array is only "not yet started". */
+  implementQueue: string[];
+  /** Set once ensureImplementerTask's create-task round-trip resolves. Reused
+   *  on every subsequent refill so the window is created at most once per
+   *  project. */
+  implementTaskId: string | null;
+  implementAgentId: string | null;
+  /** Set once ensureDeployerTask's create-task round-trip resolves. The
+   *  Deployer has no explicit ticket queue -- see jira-watcher-sequential-
+   *  queue-design.md's "Deployer window" section. */
+  deployTaskId: string | null;
+  deployAgentId: string | null;
+}
+
+function emptyProjectQueue(): ProjectQueue {
+  return {
+    implementQueue: [],
+    implementTaskId: null,
+    implementAgentId: null,
+    deployTaskId: null,
+    deployAgentId: null,
+  };
+}
+
 let jiraWin: BrowserWindow | null = null;
 let jiraBridge: ReturnType<typeof initJiraWatcherBridge> | null = null;
 let watched = new Map<string, WatchedProject>();
+let projectQueues = new Map<string, ProjectQueue>();
 let jiraTickHandle: ReturnType<typeof setInterval> | null = null;
 let jiraIsPolling = false;
 let jiraDisabled = false;
@@ -190,6 +218,9 @@ export function startWatchingProject(project: {
     triggerLabel: project.jiraTriggerLabel ?? DEFAULT_TRIGGER_LABEL,
     completedLabel: project.jiraCompletedLabel ?? DEFAULT_COMPLETED_LABEL,
   });
+  if (!projectQueues.has(project.id)) {
+    projectQueues.set(project.id, emptyProjectQueue());
+  }
   // Give the renderer an initial state so its badge/settings line isn't blank
   // until the first failure changes something.
   sendJiraStatus();
@@ -210,6 +241,7 @@ function sendJiraStatus(): void {
 
 export function stopWatchingProject(projectId: string): void {
   watched.delete(projectId);
+  projectQueues.delete(projectId);
   if (watched.size === 0) clearJiraTickInterval();
 }
 
@@ -337,6 +369,7 @@ export function __resetJiraWatcherForTests(): void {
   jiraWin = null;
   jiraBridge = null;
   watched = new Map();
+  projectQueues = new Map();
   clearJiraTickInterval();
   jiraIsPolling = false;
   jiraDisabled = false;
@@ -360,4 +393,11 @@ export function getJiraWatcherStateForTests(): {
     disabledReason: jiraDisabledReason,
     watchedProjectIds: Array.from(watched.keys()),
   };
+}
+
+export function getProjectQueueStateForTests(
+  projectId: string,
+): { implementQueue: string[] } | undefined {
+  const q = projectQueues.get(projectId);
+  return q ? { implementQueue: [...q.implementQueue] } : undefined;
 }
