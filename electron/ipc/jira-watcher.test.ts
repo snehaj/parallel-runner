@@ -233,6 +233,33 @@ describe('initJiraWatcherBridge — persistent task methods', () => {
       'Desktop app is not available',
     );
   });
+
+  it('waitForAgentReady does not time out even after the default 120s window (uses no timeout)', async () => {
+    vi.useFakeTimers();
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    const bridge = initJiraWatcherBridge(win);
+
+    const promise = bridge.waitForAgentReady('agent-1');
+    let settled = false;
+    promise.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+
+    vi.advanceTimersByTime(200_000); // well past the normal 120s callRenderer timeout
+    await Promise.resolve();
+    expect(settled).toBe(false); // still pending -- no spurious timeout rejection
+
+    const reqId = (sent[0].payload as { reqId: string }).reqId;
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, { reqId, ok: true, data: undefined });
+
+    await expect(promise).resolves.toBeUndefined();
+    vi.useRealTimers();
+  });
 });
 
 describe('watcher tick', () => {

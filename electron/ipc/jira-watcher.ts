@@ -35,7 +35,7 @@ export function buildTaskName(ticketKey: string, summary: string): string {
 interface PendingRequest {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
-  timer: NodeJS.Timeout;
+  timer: NodeJS.Timeout | undefined;
 }
 
 /** Main-process half of the Jira-watcher's own task-creation bridge — the
@@ -59,20 +59,32 @@ export function initJiraWatcherBridge(win: BrowserWindow): {
 } {
   const pending = new Map<string, PendingRequest>();
 
-  function callRenderer<T>(channel: string, payload: Record<string, unknown>): Promise<T> {
+  function callRenderer<T>(
+    channel: string,
+    payload: Record<string, unknown>,
+    timeoutMs = 120_000,
+  ): Promise<T> {
     const reqId = randomUUID();
     return new Promise<T>((resolve, reject) => {
       if (win.isDestroyed()) {
         reject(new Error('Desktop app is not available'));
         return;
       }
-      // Same 120s timeout as the mobile bridge — creating a task builds a
-      // git worktree, which can be slow on large repos.
-      const timer = setTimeout(() => {
-        pending.delete(reqId);
-        reject(new Error('Desktop app did not respond'));
-      }, 120_000);
-      pending.set(reqId, { resolve: resolve as (v: unknown) => void, reject, timer });
+      pending.set(reqId, {
+        resolve: resolve as (v: unknown) => void,
+        reject,
+        // 0 disables the timeout entirely -- waitForAgentReady can legitimately
+        // stay pending for as long as the ticket's own work takes (minutes to
+        // hours), unlike every other bridge call here which is a quick
+        // request/reply round-trip.
+        timer:
+          timeoutMs > 0
+            ? setTimeout(() => {
+                pending.delete(reqId);
+                reject(new Error('Desktop app did not respond'));
+              }, timeoutMs)
+            : undefined,
+      });
       win.webContents.send(channel, { reqId, ...payload });
     });
   }
@@ -82,7 +94,7 @@ export function initJiraWatcherBridge(win: BrowserWindow): {
     (_e, args: { reqId: string; ok: boolean; data?: unknown; error?: string }) => {
       const entry = pending.get(args.reqId);
       if (!entry) return;
-      clearTimeout(entry.timer);
+      if (entry.timer) clearTimeout(entry.timer);
       pending.delete(args.reqId);
       if (args.ok) entry.resolve(args.data);
       else entry.reject(new Error(args.error ?? 'Request failed'));
@@ -107,7 +119,7 @@ export function initJiraWatcherBridge(win: BrowserWindow): {
     promptAgent: (taskId, agentId, text) =>
       callRenderer<undefined>(IPC.JiraWatcher_PromptAgentRequest, { taskId, agentId, text }),
     waitForAgentReady: (agentId) =>
-      callRenderer<undefined>(IPC.JiraWatcher_WaitForAgentReadyRequest, { agentId }),
+      callRenderer<undefined>(IPC.JiraWatcher_WaitForAgentReadyRequest, { agentId }, 0),
   };
 }
 
