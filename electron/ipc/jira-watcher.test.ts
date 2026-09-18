@@ -622,16 +622,70 @@ describe('ProjectQueue lifecycle', () => {
     const win = fakeWindow([]);
     initJiraWatcher(win);
     startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
-    expect(getProjectQueueStateForTests('proj-1')).toEqual({ implementQueue: [] });
+    expect(getProjectQueueStateForTests('proj-1')).toEqual({
+      implementQueue: [],
+      implementTaskId: null,
+      deployTaskId: null,
+    });
     stopWatchingProject('proj-1');
   });
 
-  it('clears the queue entry when the project stops watching', () => {
+  // Was "clears the queue entry when the project stops watching" -- stopWatchingProject
+  // used to fully delete the ProjectQueue map entry. That behavior was a bug (it wiped
+  // cached implementTaskId/deployTaskId, causing a duplicate "Jira Implementer"/"Jira
+  // Deployer" task to be minted on re-watch); now it only clears in-flight-work state
+  // (implementQueue/implementCurrentTicket) and preserves the entry itself.
+  it('clears in-flight work but keeps the queue entry when the project stops watching', () => {
     const win = fakeWindow([]);
     initJiraWatcher(win);
     startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
     stopWatchingProject('proj-1');
-    expect(getProjectQueueStateForTests('proj-1')).toBeUndefined();
+    expect(getProjectQueueStateForTests('proj-1')).toEqual({
+      implementQueue: [],
+      implementTaskId: null,
+      deployTaskId: null,
+    });
+  });
+
+  it('preserves cached implementTaskId/deployTaskId across a stop/restart cycle so a re-watch reuses the existing persistent tasks instead of minting duplicates', async () => {
+    vi.mocked(queryLabeledTickets).mockResolvedValue([
+      { key: 'DEV_IRREG-1234', summary: 'Fix the thing' },
+    ]);
+
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+    });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
+    await flushPromises();
+
+    expect(getProjectQueueStateForTests('proj-1')?.implementTaskId).toBe('impl-task-1');
+
+    stopWatchingProject('proj-1');
+    // Re-watching the SAME project id must not reset the cached task ids --
+    // this is the actual Fix 2 assertion: no duplicate task should be minted.
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+
+    expect(getProjectQueueStateForTests('proj-1')).toMatchObject({
+      implementTaskId: 'impl-task-1',
+    });
+
+    sent.length = 0;
+    await flushPromises();
+    expect(sent.some((s) => s.channel === IPC.JiraWatcher_EnsureImplementerTaskRequest)).toBe(
+      false,
+    );
+
+    stopWatchingProject('proj-1');
   });
 });
 

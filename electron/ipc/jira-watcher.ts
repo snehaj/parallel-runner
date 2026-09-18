@@ -252,7 +252,20 @@ function sendJiraStatus(): void {
 
 export function stopWatchingProject(projectId: string): void {
   watched.delete(projectId);
-  projectQueues.delete(projectId);
+  // Deliberately do NOT delete the ProjectQueue entry here -- it caches
+  // implementTaskId/implementAgentId/deployTaskId/deployAgentId, which must
+  // survive a stop/restart cycle (e.g. toggling "Watch Jira board" off then
+  // on) so the next refill reuses the existing "Jira Implementer"/"Jira
+  // Deployer" task instead of minting a duplicate. Only clear the
+  // in-flight-work state that shouldn't carry over: not-yet-started tickets
+  // and the "currently in progress" marker (a ticket the Implementer was
+  // mid-way through when watching stopped is no longer being tracked as
+  // in-progress by this project, since polling itself has stopped).
+  const queue = projectQueues.get(projectId);
+  if (queue) {
+    queue.implementQueue = [];
+    queue.implementCurrentTicket = null;
+  }
   if (watched.size === 0) clearJiraTickInterval();
 }
 
@@ -313,6 +326,11 @@ async function pollOneProject(projectId: string): Promise<void> {
         console.warn('[jira-watcher] listTaskNames failed:', err);
         continue;
       }
+      // Legacy check: catches a pre-migration per-ticket task name (e.g.
+      // "DEV_IRREG-1234: ..."), which the new architecture never creates
+      // (tasks are always named "Jira Implementer"/"Jira Deployer" now).
+      // Kept as a safety net for tickets whose old-style task predates this
+      // branch; remove once no such tasks remain in the field.
       if (hasTicketKey(existingNames, ticket.key)) continue;
 
       queue.implementQueue.push(ticket.key);
@@ -321,7 +339,9 @@ async function pollOneProject(projectId: string): Promise<void> {
         await swapTicketLabel(ticket.key, entry.triggerLabel, entry.completedLabel);
       } catch (err) {
         console.warn('[jira-watcher] label swap failed for', ticket.key, err);
-        // Ticket keeps triggerLabel — caught by the hasTicketKey check next tick.
+        // Ticket keeps triggerLabel — caught by the implementCurrentTicket/implementQueue
+        // checks above on the next tick (not hasTicketKey, which only matches
+        // pre-migration per-ticket task names).
       }
     }
 
@@ -502,7 +522,13 @@ export function getJiraWatcherStateForTests(): {
 
 export function getProjectQueueStateForTests(
   projectId: string,
-): { implementQueue: string[] } | undefined {
+): { implementQueue: string[]; implementTaskId: string | null; deployTaskId: string | null } | undefined {
   const q = projectQueues.get(projectId);
-  return q ? { implementQueue: [...q.implementQueue] } : undefined;
+  return q
+    ? {
+        implementQueue: [...q.implementQueue],
+        implementTaskId: q.implementTaskId,
+        deployTaskId: q.deployTaskId,
+      }
+    : undefined;
 }
