@@ -150,6 +150,91 @@ describe('initJiraWatcherBridge', () => {
   });
 });
 
+describe('initJiraWatcherBridge — persistent task methods', () => {
+  it('ensureImplementerTask sends a request and resolves with {taskId, agentId}', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    const bridge = initJiraWatcherBridge(win);
+
+    const promise = bridge.ensureImplementerTask('proj-1');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].channel).toBe(IPC.JiraWatcher_EnsureImplementerTaskRequest);
+    const reqId = (sent[0].payload as { reqId: string }).reqId;
+
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, { reqId, ok: true, data: { taskId: 'task-1', agentId: 'agent-1' } });
+
+    await expect(promise).resolves.toEqual({ taskId: 'task-1', agentId: 'agent-1' });
+  });
+
+  it('ensureDeployerTask sends its own distinct request channel', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    const bridge = initJiraWatcherBridge(win);
+
+    const promise = bridge.ensureDeployerTask('proj-1');
+    expect(sent[0].channel).toBe(IPC.JiraWatcher_EnsureDeployerTaskRequest);
+    const reqId = (sent[0].payload as { reqId: string }).reqId;
+
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, { reqId, ok: true, data: { taskId: 'task-2', agentId: 'agent-2' } });
+
+    await expect(promise).resolves.toEqual({ taskId: 'task-2', agentId: 'agent-2' });
+  });
+
+  it('promptAgent sends taskId/agentId/text and resolves on an ok reply', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    const bridge = initJiraWatcherBridge(win);
+
+    const promise = bridge.promptAgent('task-1', 'agent-1', '/myl3 DEV_IRREG-1 @a');
+    expect(sent[0].channel).toBe(IPC.JiraWatcher_PromptAgentRequest);
+    expect(sent[0].payload).toMatchObject({
+      taskId: 'task-1',
+      agentId: 'agent-1',
+      text: '/myl3 DEV_IRREG-1 @a',
+    });
+    const reqId = (sent[0].payload as { reqId: string }).reqId;
+
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, { reqId, ok: true, data: undefined });
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it('waitForAgentReady sends agentId and resolves once, with no fixed timeout applied', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    const bridge = initJiraWatcherBridge(win);
+
+    const promise = bridge.waitForAgentReady('agent-1');
+    expect(sent[0].channel).toBe(IPC.JiraWatcher_WaitForAgentReadyRequest);
+    expect(sent[0].payload).toMatchObject({ agentId: 'agent-1' });
+    const reqId = (sent[0].payload as { reqId: string }).reqId;
+
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, { reqId, ok: true, data: undefined });
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it('promptAgent rejects immediately if the window is destroyed', async () => {
+    const win = { isDestroyed: () => true } as unknown as import('electron').BrowserWindow;
+    const bridge = initJiraWatcherBridge(win);
+    await expect(bridge.promptAgent('t', 'a', 'text')).rejects.toThrow(
+      'Desktop app is not available',
+    );
+  });
+});
+
 describe('watcher tick', () => {
   beforeEach(() => {
     __resetJiraWatcherForTests();

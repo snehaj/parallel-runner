@@ -52,6 +52,10 @@ export function initJiraWatcherBridge(win: BrowserWindow): {
     taskId: string;
   }>;
   listTaskNames: (projectId: string) => Promise<string[]>;
+  ensureImplementerTask: (projectId: string) => Promise<{ taskId: string; agentId: string }>;
+  ensureDeployerTask: (projectId: string) => Promise<{ taskId: string; agentId: string }>;
+  promptAgent: (taskId: string, agentId: string, text: string) => Promise<void>;
+  waitForAgentReady: (agentId: string) => Promise<void>;
 } {
   const pending = new Map<string, PendingRequest>();
 
@@ -91,6 +95,19 @@ export function initJiraWatcherBridge(win: BrowserWindow): {
       callRenderer<{ names: string[] }>(IPC.JiraWatcher_ListTaskNamesRequest, {
         projectId,
       }).then((r) => r.names),
+    ensureImplementerTask: (projectId) =>
+      callRenderer<{ taskId: string; agentId: string }>(
+        IPC.JiraWatcher_EnsureImplementerTaskRequest,
+        { projectId },
+      ),
+    ensureDeployerTask: (projectId) =>
+      callRenderer<{ taskId: string; agentId: string }>(IPC.JiraWatcher_EnsureDeployerTaskRequest, {
+        projectId,
+      }),
+    promptAgent: (taskId, agentId, text) =>
+      callRenderer<undefined>(IPC.JiraWatcher_PromptAgentRequest, { taskId, agentId, text }),
+    waitForAgentReady: (agentId) =>
+      callRenderer<undefined>(IPC.JiraWatcher_WaitForAgentReadyRequest, { agentId }),
   };
 }
 
