@@ -5,7 +5,8 @@
 // main-side bridge.
 
 import { store } from './core';
-import { createTask, updateTaskNotes } from './tasks';
+import { createTask, sendPrompt, updateTaskNotes } from './tasks';
+import { onAgentReady } from './taskStatus';
 import { invoke } from '../lib/ipc';
 import { IPC } from '../../electron/ipc/channels';
 import type { GitIgnoredEntry } from '../ipc/types';
@@ -31,6 +32,20 @@ interface SetNotesRequest extends RendererRequest {
 
 interface ListTaskNamesRequest extends RendererRequest {
   projectId: string;
+}
+
+interface EnsureTaskRequest extends RendererRequest {
+  projectId: string;
+}
+
+interface PromptAgentRequest extends RendererRequest {
+  taskId: string;
+  agentId: string;
+  text: string;
+}
+
+interface WaitForAgentReadyRequest extends RendererRequest {
+  agentId: string;
 }
 
 function reply(
@@ -156,6 +171,86 @@ function handleListTaskNames(req: ListTaskNamesRequest): void {
   reply(req.reqId, true, { names }, undefined, IPC.JiraWatcher_RendererReply);
 }
 
+/** Shared by EnsureImplementerTask/EnsureDeployerTask -- creates one
+ *  persistent, un-prompted task (no initialPrompt) for the given project and
+ *  replies with {taskId, agentId}. `name` distinguishes the Implementer's
+ *  window from the Deployer's in the task list. */
+async function ensurePersistentTask(req: EnsureTaskRequest, name: string): Promise<void> {
+  try {
+    const project = store.projects.find((p) => p.id === req.projectId);
+    if (!project) throw new Error('Project not found');
+
+    const agentDef =
+      store.availableAgents.find((a) => a.id === store.lastAgentId) ?? store.availableAgents[0];
+    if (!agentDef) throw new Error('No agent configured');
+
+    const isGit = project.isGitRepo !== false;
+    let baseBranch = '';
+    let symlinkDirs: string[] = [];
+    if (isGit) {
+      baseBranch =
+        project.defaultBaseBranch ??
+        (await invoke<string>(IPC.GetMainBranch, { projectRoot: project.path }));
+      const ignoredEntries = await invoke<GitIgnoredEntry[]>(IPC.GetGitignoredDirs, {
+        projectRoot: project.path,
+      });
+      symlinkDirs = ignoredEntries.filter((entry) => entry.isDefault).map((entry) => entry.name);
+    }
+
+    const taskId = await createTask({
+      name,
+      agentDef,
+      projectId: req.projectId,
+      gitIsolation: isGit ? 'worktree' : 'none',
+      baseBranch,
+      symlinkDirs,
+      // No initialPrompt -- this task starts idle. The first ticket is
+      // delivered via a separate PromptAgent request once this one replies.
+    });
+    const agentId = store.tasks[taskId]?.agentIds[0];
+    if (!agentId) throw new Error('Created task has no agent');
+
+    reply(req.reqId, true, { taskId, agentId }, undefined, IPC.JiraWatcher_RendererReply);
+  } catch (err) {
+    reply(
+      req.reqId,
+      false,
+      undefined,
+      err instanceof Error ? err.message : String(err),
+      IPC.JiraWatcher_RendererReply,
+    );
+  }
+}
+
+function handleEnsureImplementerTask(req: EnsureTaskRequest): Promise<void> {
+  return ensurePersistentTask(req, 'Jira Implementer');
+}
+
+function handleEnsureDeployerTask(req: EnsureTaskRequest): Promise<void> {
+  return ensurePersistentTask(req, 'Jira Deployer');
+}
+
+async function handlePromptAgent(req: PromptAgentRequest): Promise<void> {
+  try {
+    await sendPrompt(req.taskId, req.agentId, req.text);
+    reply(req.reqId, true, undefined, undefined, IPC.JiraWatcher_RendererReply);
+  } catch (err) {
+    reply(
+      req.reqId,
+      false,
+      undefined,
+      err instanceof Error ? err.message : String(err),
+      IPC.JiraWatcher_RendererReply,
+    );
+  }
+}
+
+function handleWaitForAgentReady(req: WaitForAgentReadyRequest): void {
+  onAgentReady(req.agentId, () => {
+    reply(req.reqId, true, undefined, undefined, IPC.JiraWatcher_RendererReply);
+  });
+}
+
 /** Subscribe to mobile task-creation requests and the Jira board watcher's own
  *  create-task / list-task-names round-trips. Returns an unsubscribe fn. */
 export function startRemoteTaskHandlers(): () => void {
@@ -195,6 +290,31 @@ export function startRemoteTaskHandlers(): () => void {
       if (data && typeof data === 'object') void handleJiraCreateTask(data as CreateTaskRequest);
     },
   );
+  const offEnsureImplementer = window.electron.ipcRenderer.on(
+    IPC.JiraWatcher_EnsureImplementerTaskRequest,
+    (data: unknown) => {
+      if (data && typeof data === 'object')
+        void handleEnsureImplementerTask(data as EnsureTaskRequest);
+    },
+  );
+  const offEnsureDeployer = window.electron.ipcRenderer.on(
+    IPC.JiraWatcher_EnsureDeployerTaskRequest,
+    (data: unknown) => {
+      if (data && typeof data === 'object') void handleEnsureDeployerTask(data as EnsureTaskRequest);
+    },
+  );
+  const offPromptAgent = window.electron.ipcRenderer.on(
+    IPC.JiraWatcher_PromptAgentRequest,
+    (data: unknown) => {
+      if (data && typeof data === 'object') void handlePromptAgent(data as PromptAgentRequest);
+    },
+  );
+  const offWaitForAgentReady = window.electron.ipcRenderer.on(
+    IPC.JiraWatcher_WaitForAgentReadyRequest,
+    (data: unknown) => {
+      if (data && typeof data === 'object') handleWaitForAgentReady(data as WaitForAgentReadyRequest);
+    },
+  );
   return () => {
     offProjects();
     offCreate();
@@ -202,5 +322,9 @@ export function startRemoteTaskHandlers(): () => void {
     offSetNotes();
     offListTaskNames();
     offJiraCreate();
+    offEnsureImplementer();
+    offEnsureDeployer();
+    offPromptAgent();
+    offWaitForAgentReady();
   };
 }

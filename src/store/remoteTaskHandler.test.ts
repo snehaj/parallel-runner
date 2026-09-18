@@ -2,15 +2,22 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { createStore } from 'solid-js/store';
 
-const { mockInvoke, mockCreateTask, mockUpdateTaskNotes } = vi.hoisted(() => ({
-  mockInvoke: vi.fn(),
-  mockCreateTask: vi.fn(),
-  mockUpdateTaskNotes: vi.fn(),
-}));
+const { mockInvoke, mockCreateTask, mockUpdateTaskNotes, mockSendPrompt, mockOnAgentReady } =
+  vi.hoisted(() => ({
+    mockInvoke: vi.fn(),
+    mockCreateTask: vi.fn(),
+    mockUpdateTaskNotes: vi.fn(),
+    mockSendPrompt: vi.fn(),
+    mockOnAgentReady: vi.fn(),
+  }));
 vi.mock('../lib/ipc', () => ({ invoke: mockInvoke }));
 vi.mock('./tasks', () => ({
   createTask: mockCreateTask,
   updateTaskNotes: mockUpdateTaskNotes,
+  sendPrompt: mockSendPrompt,
+}));
+vi.mock('./taskStatus', () => ({
+  onAgentReady: mockOnAgentReady,
 }));
 
 import { setStore } from './core';
@@ -245,5 +252,165 @@ describe('handleJiraCreateTask', () => {
         error: undefined,
       });
     });
+  });
+});
+
+describe('Jira watcher persistent-task bridge handlers', () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockCreateTask.mockReset();
+    mockSendPrompt.mockReset();
+    mockOnAgentReady.mockReset();
+    mockOn.mockClear();
+    // reply() fire-and-forgets a .catch() onto invoke()'s return value, so the
+    // mock needs a resolved promise by default (bare vi.fn() returns undefined).
+    mockInvoke.mockResolvedValue(undefined);
+    setStore('projects', [{ id: 'proj-1', name: 'P', path: '/p', color: 'red', isGitRepo: true }]);
+    setStore('availableAgents', [
+      {
+        id: 'claude',
+        name: 'Claude',
+        command: 'claude',
+        args: [],
+        resume_args: [],
+        skip_permissions_args: [],
+        description: '',
+      },
+    ]);
+    setStore('tasks', {});
+    startRemoteTaskHandlers();
+  });
+
+  it('EnsureImplementerTask creates a task once and replies with {taskId, agentId}', async () => {
+    // GetMainBranch resolves to a branch name; GetGitignoredDirs resolves to a
+    // list the handler .filter()s -- distinguish by channel so neither call
+    // gets the other's shape.
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === IPC.GetMainBranch) return Promise.resolve('main');
+      if (channel === IPC.GetGitignoredDirs) return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    mockCreateTask.mockResolvedValue('new-task-1');
+    setStore('tasks', 'new-task-1', {
+      id: 'new-task-1',
+      agentIds: ['new-agent-1'],
+      projectId: 'proj-1',
+    } as never);
+
+    const listener = listenerFor(IPC.JiraWatcher_EnsureImplementerTaskRequest);
+    listener?.({ reqId: 'r1', projectId: 'proj-1' });
+
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        IPC.JiraWatcher_RendererReply,
+        expect.objectContaining({
+          reqId: 'r1',
+          ok: true,
+          data: { taskId: 'new-task-1', agentId: 'new-agent-1' },
+        }),
+      );
+    });
+    expect(mockCreateTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('EnsureDeployerTask is independent of EnsureImplementerTask -- calling both creates two tasks', async () => {
+    // GetMainBranch resolves to a branch name; GetGitignoredDirs resolves to a
+    // list the handler .filter()s -- distinguish by channel so neither call
+    // gets the other's shape.
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === IPC.GetMainBranch) return Promise.resolve('main');
+      if (channel === IPC.GetGitignoredDirs) return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    mockCreateTask.mockResolvedValueOnce('impl-task').mockResolvedValueOnce('deploy-task');
+    setStore('tasks', 'impl-task', {
+      id: 'impl-task',
+      agentIds: ['impl-agent'],
+      projectId: 'proj-1',
+    } as never);
+    setStore('tasks', 'deploy-task', {
+      id: 'deploy-task',
+      agentIds: ['deploy-agent'],
+      projectId: 'proj-1',
+    } as never);
+
+    listenerFor(IPC.JiraWatcher_EnsureImplementerTaskRequest)?.({
+      reqId: 'r1',
+      projectId: 'proj-1',
+    });
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        IPC.JiraWatcher_RendererReply,
+        expect.objectContaining({
+          reqId: 'r1',
+          data: { taskId: 'impl-task', agentId: 'impl-agent' },
+        }),
+      );
+    });
+    listenerFor(IPC.JiraWatcher_EnsureDeployerTaskRequest)?.({
+      reqId: 'r2',
+      projectId: 'proj-1',
+    });
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        IPC.JiraWatcher_RendererReply,
+        expect.objectContaining({
+          reqId: 'r2',
+          data: { taskId: 'deploy-task', agentId: 'deploy-agent' },
+        }),
+      );
+    });
+
+    expect(mockCreateTask).toHaveBeenCalledTimes(2);
+  });
+
+  it('PromptAgent calls sendPrompt with the given taskId/agentId/text and replies ok', async () => {
+    mockSendPrompt.mockResolvedValue(undefined);
+    listenerFor(IPC.JiraWatcher_PromptAgentRequest)?.({
+      reqId: 'r3',
+      taskId: 't1',
+      agentId: 'a1',
+      text: '/myl3 DEV_IRREG-1 @a',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockSendPrompt).toHaveBeenCalledWith('t1', 'a1', '/myl3 DEV_IRREG-1 @a');
+    expect(mockInvoke).toHaveBeenCalledWith(
+      IPC.JiraWatcher_RendererReply,
+      expect.objectContaining({ reqId: 'r3', ok: true }),
+    );
+  });
+
+  it('PromptAgent replies with ok:false when sendPrompt rejects', async () => {
+    mockSendPrompt.mockRejectedValue(new Error('agent not found'));
+    listenerFor(IPC.JiraWatcher_PromptAgentRequest)?.({
+      reqId: 'r4',
+      taskId: 't1',
+      agentId: 'a1',
+      text: 'hi',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      IPC.JiraWatcher_RendererReply,
+      expect.objectContaining({ reqId: 'r4', ok: false, error: 'agent not found' }),
+    );
+  });
+
+  it('WaitForAgentReady registers onAgentReady and replies ok once it fires', () => {
+    listenerFor(IPC.JiraWatcher_WaitForAgentReadyRequest)?.({ reqId: 'r5', agentId: 'a1' });
+
+    expect(mockOnAgentReady).toHaveBeenCalledWith('a1', expect.any(Function));
+    expect(mockInvoke).not.toHaveBeenCalled(); // not replied yet -- still waiting
+
+    const registeredCallback = mockOnAgentReady.mock.calls[0][1] as () => void;
+    registeredCallback();
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      IPC.JiraWatcher_RendererReply,
+      expect.objectContaining({ reqId: 'r5', ok: true }),
+    );
   });
 });
