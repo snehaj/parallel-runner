@@ -55,6 +55,7 @@ describe('startJiraWatcherSubscription', () => {
       jiraProjectKey: 'DEV_IRREG',
       jiraTriggerLabel: undefined,
       jiraCompletedLabel: undefined,
+      jiraDefaultReviewers: undefined,
     });
     expect(mockFireAndForget).not.toHaveBeenCalledWith(
       IPC.StartJiraWatcher,

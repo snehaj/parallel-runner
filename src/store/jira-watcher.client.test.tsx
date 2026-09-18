@@ -95,6 +95,28 @@ describe('startJiraWatcherSubscription settings changes', () => {
     });
   });
 
+  it('re-sends StartJiraWatcher when jiraDefaultReviewers changes on an already-enabled project', () => {
+    setStore('projects', [
+      {
+        id: 'p1',
+        name: 'A',
+        path: '/a',
+        color: 'red',
+        jiraWatchEnabled: true,
+        jiraProjectKey: 'DEV_IRREG',
+        jiraDefaultReviewers: '@old',
+      },
+    ]);
+    withSubscription(() => {
+      mockFireAndForget.mockClear();
+      setStore('projects', 0, 'jiraDefaultReviewers', '@new');
+      expect(mockFireAndForget).toHaveBeenCalledWith(
+        IPC.StartJiraWatcher,
+        expect.objectContaining({ projectId: 'p1', jiraDefaultReviewers: '@new' }),
+      );
+    });
+  });
+
   it('does not re-send StartJiraWatcher when no tracked field changed', () => {
     setStore('projects', [
       {

@@ -90,6 +90,10 @@ export interface Project {
    *  watcher has nothing to query and effectively does nothing even if
    *  jiraWatchEnabled is true. */
   jiraProjectKey?: string;
+  /** Default reviewers string (e.g. '@avnair @spummer') passed verbatim as
+   *  myl3's `reviewers` argument for every ticket the Implementer queue
+   *  auto-picks up. Unset means myl3 runs without named reviewers. */
+  jiraDefaultReviewers?: string;
 }
 
 export interface Agent {

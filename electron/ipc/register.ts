@@ -903,6 +903,8 @@ export function registerAllHandlers(win: BrowserWindow): void {
         typeof args.jiraTriggerLabel === 'string' ? args.jiraTriggerLabel : undefined,
       jiraCompletedLabel:
         typeof args.jiraCompletedLabel === 'string' ? args.jiraCompletedLabel : undefined,
+      jiraDefaultReviewers:
+        typeof args.jiraDefaultReviewers === 'string' ? args.jiraDefaultReviewers : undefined,
     });
   });
   ipcMain.handle(IPC.StopJiraWatcher, (_e, args) => {

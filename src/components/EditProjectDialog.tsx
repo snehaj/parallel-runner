@@ -34,6 +34,7 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
   const [jiraProjectKey, setJiraProjectKey] = createSignal('');
   const [jiraTriggerLabel, setJiraTriggerLabel] = createSignal('');
   const [jiraCompletedLabel, setJiraCompletedLabel] = createSignal('');
+  const [jiraDefaultReviewers, setJiraDefaultReviewers] = createSignal('');
   const [checkingNow, setCheckingNow] = createSignal(false);
   const [checkNowResult, setCheckNowResult] = createSignal<string | null>(null);
   const [checkNowError, setCheckNowError] = createSignal<string | null>(null);
@@ -58,6 +59,7 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
     setJiraProjectKey(p.jiraProjectKey ?? '');
     setJiraTriggerLabel(p.jiraTriggerLabel ?? '');
     setJiraCompletedLabel(p.jiraCompletedLabel ?? '');
+    setJiraDefaultReviewers(p.jiraDefaultReviewers ?? '');
     setBookmarks(p.terminalBookmarks ? [...p.terminalBookmarks] : []);
     setNewCommand('');
     setConfirmRemove(false);
@@ -114,6 +116,7 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
       jiraProjectKey: jiraProjectKey().trim() || undefined,
       jiraTriggerLabel: jiraTriggerLabel().trim() || undefined,
       jiraCompletedLabel: jiraCompletedLabel().trim() || undefined,
+      jiraDefaultReviewers: jiraDefaultReviewers().trim() || undefined,
       terminalBookmarks: bookmarks(),
     });
     props.onClose();
@@ -586,6 +589,41 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
                       outline: 'none',
                     }}
                   />
+                </div>
+                <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
+                  <label style={sectionLabelStyle}>
+                    Default reviewers{' '}
+                    <span style={{ opacity: '0.5', 'text-transform': 'none' }}>
+                      (e.g. @avnair @spummer)
+                    </span>
+                  </label>
+                  <input
+                    class="input-field"
+                    type="text"
+                    value={jiraDefaultReviewers()}
+                    onInput={(e) => setJiraDefaultReviewers(e.currentTarget.value)}
+                    placeholder="@avnair @spummer"
+                    style={{
+                      background: theme.bgInput,
+                      border: `1px solid ${theme.border}`,
+                      'border-radius': '8px',
+                      padding: '10px 14px',
+                      color: theme.fg,
+                      'font-size': '14px',
+                      'font-family': "'JetBrains Mono', monospace",
+                      outline: 'none',
+                    }}
+                  />
+                  <div
+                    style={{
+                      'font-size': '12px',
+                      color: theme.fgSubtle,
+                      padding: '2px 2px 0',
+                    }}
+                  >
+                    Used as the reviewers argument for every ticket the Implementer queue picks up
+                    automatically (e.g. passed to <code>/myl3</code>).
+                  </div>
                 </div>
               </Show>
             </div>

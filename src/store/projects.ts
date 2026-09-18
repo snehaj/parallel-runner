@@ -70,6 +70,7 @@ export function updateProject(
       | 'jiraTriggerLabel'
       | 'jiraCompletedLabel'
       | 'jiraProjectKey'
+      | 'jiraDefaultReviewers'
     >
   >,
 ): void {
@@ -100,6 +101,8 @@ export function updateProject(
         s.projects[idx].jiraCompletedLabel = updates.jiraCompletedLabel;
       if (Object.prototype.hasOwnProperty.call(updates, 'jiraProjectKey'))
         s.projects[idx].jiraProjectKey = updates.jiraProjectKey;
+      if (Object.prototype.hasOwnProperty.call(updates, 'jiraDefaultReviewers'))
+        s.projects[idx].jiraDefaultReviewers = updates.jiraDefaultReviewers;
     }),
   );
 }
