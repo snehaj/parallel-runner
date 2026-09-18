@@ -37,7 +37,12 @@ import {
   refreshPrChecksWatcher,
   isPrUrl,
 } from './pr-checks.js';
-import { initJiraWatcher, startWatchingProject, stopWatchingProject } from './jira-watcher.js';
+import {
+  initJiraWatcher,
+  startWatchingProject,
+  stopWatchingProject,
+  triggerJiraCheckNow,
+} from './jira-watcher.js';
 import { setJiraCredentials } from './jira-client.js';
 import { readCoverageSummary } from './coverage.js';
 import { loadEslintQualityFindings } from './eslint-quality-findings.js';
@@ -903,6 +908,10 @@ export function registerAllHandlers(win: BrowserWindow): void {
   ipcMain.handle(IPC.StopJiraWatcher, (_e, args) => {
     assertString(args.projectId, 'projectId');
     stopWatchingProject(args.projectId);
+  });
+  ipcMain.handle(IPC.TriggerJiraCheckNow, (_e, args) => {
+    assertString(args.projectId, 'projectId');
+    return triggerJiraCheckNow(args.projectId);
   });
   ipcMain.handle(IPC.SetJiraCredentials, (_e, args) => {
     assertString(args.email, 'email');

@@ -31,7 +31,9 @@ import {
   setShareDockerAgentAuth,
   setAskCodeProvider,
   setMinimaxApiKey,
+  getJiraEmail,
   setJiraEmail,
+  isJiraTokenSet,
   setJiraToken,
   setAppearanceMode,
   setLightTheme,
@@ -681,6 +683,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 </span>
                 <input
                   type="text"
+                  value={getJiraEmail()}
                   onInput={(e) => setJiraEmail(e.currentTarget.value)}
                   placeholder="you@company.com"
                   style={{
@@ -723,6 +726,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   }}
                 />
               </label>
+              <Show when={isJiraTokenSet()}>
+                <span style={{ 'font-size': '11px', color: theme.fgSubtle }}>
+                  API token set ✓ (write-only — re-enter to change it)
+                </span>
+              </Show>
             </div>
             <span style={{ 'font-size': '11px', color: theme.fgSubtle }}>
               Used by the Jira board watcher (enabled per-project in Edit Project) to poll for

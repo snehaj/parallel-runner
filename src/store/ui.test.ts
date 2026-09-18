@@ -27,6 +27,12 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('solid-js', () => ({
   batch: (fn: () => void) => fn(),
+  // Minimal synchronous stand-in -- no reactivity needed for these tests,
+  // just the getter/setter tuple shape ui.ts's Jira signals rely on.
+  createSignal: <T>(initial: T): [() => T, (v: T) => void] => {
+    let value = initial;
+    return [() => value, (v: T) => (value = v)];
+  },
 }));
 
 // Real Solid produce uses Proxy mutation tracking; for the mock, a thin

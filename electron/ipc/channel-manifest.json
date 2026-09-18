@@ -151,5 +151,6 @@
   "MCP_TaskCleanupFailed": "mcp_task_cleanup_failed",
   "StartJiraWatcher": "start_jira_watcher",
   "StopJiraWatcher": "stop_jira_watcher",
-  "JiraWatcherStatus": "jira_watcher_status"
+  "JiraWatcherStatus": "jira_watcher_status",
+  "TriggerJiraCheckNow": "trigger_jira_check_now"
 }

@@ -9,6 +9,8 @@ import { SegmentedButtons } from './SegmentedButtons';
 import { ImportWorktreesDialog } from './ImportWorktreesDialog';
 import { CloseIcon } from './icons';
 import { RemoveProjectConfirm } from './RemoveProjectConfirm';
+import { invoke } from '../lib/ipc';
+import { IPC } from '../../electron/ipc/channels';
 
 interface EditProjectDialogProps {
   project: Project | null;
@@ -32,6 +34,9 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
   const [jiraProjectKey, setJiraProjectKey] = createSignal('');
   const [jiraTriggerLabel, setJiraTriggerLabel] = createSignal('');
   const [jiraCompletedLabel, setJiraCompletedLabel] = createSignal('');
+  const [checkingNow, setCheckingNow] = createSignal(false);
+  const [checkNowResult, setCheckNowResult] = createSignal<string | null>(null);
+  const [checkNowError, setCheckNowError] = createSignal<string | null>(null);
   const [bookmarks, setBookmarks] = createSignal<TerminalBookmark[]>([]);
   const [newCommand, setNewCommand] = createSignal('');
   const [showImportDialog, setShowImportDialog] = createSignal(false);
@@ -56,8 +61,25 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
     setBookmarks(p.terminalBookmarks ? [...p.terminalBookmarks] : []);
     setNewCommand('');
     setConfirmRemove(false);
+    setCheckNowResult(null);
+    setCheckNowError(null);
     requestAnimationFrame(() => nameRef?.focus());
   });
+
+  async function handleTriggerNow() {
+    if (!props.project) return;
+    setCheckingNow(true);
+    setCheckNowError(null);
+    setCheckNowResult(null);
+    try {
+      await invoke(IPC.TriggerJiraCheckNow, { projectId: props.project.id });
+      setCheckNowResult('Checked Jira just now.');
+    } catch (err) {
+      setCheckNowError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCheckingNow(false);
+    }
+  }
 
   function addBookmark() {
     const cmd = newCommand().trim();
@@ -464,6 +486,36 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
                   }}
                 >
                   Status: {jiraWatcherStatusLabel()}
+                </div>
+                <div style={{ display: 'flex', 'align-items': 'center', gap: '8px' }}>
+                  <button
+                    type="button"
+                    disabled={checkingNow()}
+                    onClick={handleTriggerNow}
+                    style={{
+                      padding: '6px 14px',
+                      background: theme.accent,
+                      border: 'none',
+                      'border-radius': '8px',
+                      color: theme.accentText,
+                      cursor: checkingNow() ? 'not-allowed' : 'pointer',
+                      'font-size': '13px',
+                      'font-weight': '600',
+                      opacity: checkingNow() ? '0.5' : '1',
+                    }}
+                  >
+                    {checkingNow() ? 'Checking…' : 'Check Jira now'}
+                  </button>
+                  <Show when={checkNowResult()}>
+                    <div style={{ 'font-size': '12px', color: theme.fgSubtle }}>
+                      {checkNowResult()}
+                    </div>
+                  </Show>
+                  <Show when={checkNowError()}>
+                    <div style={{ 'font-size': '12px', color: theme.warning }}>
+                      {checkNowError()}
+                    </div>
+                  </Show>
                 </div>
                 <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
                   <label style={sectionLabelStyle}>Jira project key</label>

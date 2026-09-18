@@ -115,6 +115,9 @@ let jiraTickHandle: ReturnType<typeof setInterval> | null = null;
 let jiraIsPolling = false;
 let jiraDisabled = false;
 let jiraDisabledReason: 'no-credentials' | 'auth' | null = null;
+/** Per-project re-entrancy guard: protects both the scheduled tick and the
+ *  manual "check now" trigger from overlapping polls of the same project. */
+const pollingProjectIds = new Set<string>();
 
 /** Public: wire window-lifecycle listeners and create the task-creation
  *  bridge. Call once from registerAllHandlers, same as initPrChecks. */
@@ -162,7 +165,7 @@ export function startWatchingProject(project: {
   // until the first failure changes something.
   sendJiraStatus();
   ensureJiraInterval();
-  void pollOneProject(project.id);
+  pollOneProject(project.id).catch(handleJiraError);
 }
 
 /** Pushes the watcher's current availability to the renderer. One-way, no
@@ -216,44 +219,59 @@ async function runJiraTick(): Promise<void> {
 async function pollOneProject(projectId: string): Promise<void> {
   const entry = watched.get(projectId);
   if (!entry || !jiraBridge) return;
+  if (pollingProjectIds.has(projectId)) return;
+  pollingProjectIds.add(projectId);
 
-  let tickets: { key: string; summary: string }[];
   try {
-    tickets = await queryLabeledTickets(entry.jiraProjectKey, entry.triggerLabel);
+    // Let the caller decide how to route a failure here: runJiraTick's call
+    // sites swallow via .catch(handleJiraError), while triggerJiraCheckNow
+    // needs the rejection to surface a specific error in the UI.
+    const tickets = await queryLabeledTickets(entry.jiraProjectKey, entry.triggerLabel);
+
+    for (const ticket of tickets) {
+      let existingNames: string[];
+      try {
+        existingNames = await jiraBridge.listTaskNames(projectId);
+      } catch (err) {
+        console.warn('[jira-watcher] listTaskNames failed:', err);
+        continue;
+      }
+      if (hasTicketKey(existingNames, ticket.key)) continue;
+
+      let created: { taskId: string };
+      try {
+        created = await jiraBridge.createTask({
+          projectId,
+          name: buildTaskName(ticket.key, ticket.summary),
+          prompt: `Implement ${ticket.key}: ${ticket.summary}`,
+        });
+      } catch (err) {
+        console.warn('[jira-watcher] createTask failed for', ticket.key, err);
+        continue;
+      }
+      void created; // taskId not currently used further, but kept for future logging/telemetry
+
+      try {
+        await swapTicketLabel(ticket.key, entry.triggerLabel, entry.completedLabel);
+      } catch (err) {
+        console.warn('[jira-watcher] label swap failed for', ticket.key, err);
+        // Ticket keeps triggerLabel — caught by the hasTicketKey check next tick.
+      }
+    }
+  } finally {
+    pollingProjectIds.delete(projectId);
+  }
+}
+
+/** Public: manually trigger a single-project poll outside the scheduled tick.
+ *  Unlike runJiraTick's call sites (which swallow via .catch(handleJiraError)),
+ *  this rethrows after handleJiraError so the UI can surface the failure. */
+export async function triggerJiraCheckNow(projectId: string): Promise<void> {
+  try {
+    await pollOneProject(projectId);
   } catch (err) {
     handleJiraError(err);
-    return;
-  }
-
-  for (const ticket of tickets) {
-    let existingNames: string[];
-    try {
-      existingNames = await jiraBridge.listTaskNames(projectId);
-    } catch (err) {
-      console.warn('[jira-watcher] listTaskNames failed:', err);
-      continue;
-    }
-    if (hasTicketKey(existingNames, ticket.key)) continue;
-
-    let created: { taskId: string };
-    try {
-      created = await jiraBridge.createTask({
-        projectId,
-        name: buildTaskName(ticket.key, ticket.summary),
-        prompt: `Implement ${ticket.key}: ${ticket.summary}`,
-      });
-    } catch (err) {
-      console.warn('[jira-watcher] createTask failed for', ticket.key, err);
-      continue;
-    }
-    void created; // taskId not currently used further, but kept for future logging/telemetry
-
-    try {
-      await swapTicketLabel(ticket.key, entry.triggerLabel, entry.completedLabel);
-    } catch (err) {
-      console.warn('[jira-watcher] label swap failed for', ticket.key, err);
-      // Ticket keeps triggerLabel — caught by the hasTicketKey check next tick.
-    }
+    throw err;
   }
 }
 

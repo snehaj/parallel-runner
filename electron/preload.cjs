@@ -156,6 +156,7 @@ const ALLOWED_CHANNELS = new Set([
   'start_jira_watcher',
   'stop_jira_watcher',
   'jira_watcher_status',
+  'trigger_jira_check_now',
 ]);
 
 function isAllowedChannel(channel) {

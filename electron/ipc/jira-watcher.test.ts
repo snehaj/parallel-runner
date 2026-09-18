@@ -36,6 +36,7 @@ import {
   initJiraWatcher,
   startWatchingProject,
   stopWatchingProject,
+  triggerJiraCheckNow,
   getJiraWatcherStateForTests,
   __resetJiraWatcherForTests,
   __runJiraTickForTests,
@@ -316,6 +317,120 @@ describe('watcher tick', () => {
     windowEvents.get('restore')?.();
     await flushPromises();
     expect(queryLabeledTickets).toHaveBeenCalledTimes(3);
+    stopWatchingProject('proj-1');
+  });
+});
+
+describe('triggerJiraCheckNow', () => {
+  beforeEach(() => {
+    __resetJiraWatcherForTests();
+    vi.mocked(queryLabeledTickets).mockReset();
+    vi.mocked(swapTicketLabel).mockReset();
+  });
+
+  it('finds a ticket, creates a task, and swaps its label on the happy path', async () => {
+    vi.mocked(queryLabeledTickets).mockResolvedValue([
+      { key: 'DEV_IRREG-2139', summary: 'Manual trigger check' },
+    ]);
+    vi.mocked(swapTicketLabel).mockResolvedValue(undefined);
+
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_CreateTaskRequest, { taskId: 'task-1' });
+    await flushPromises();
+
+    sent.length = 0;
+    vi.mocked(queryLabeledTickets).mockResolvedValue([
+      { key: 'DEV_IRREG-2139', summary: 'Manual trigger check' },
+    ]);
+
+    const promise = triggerJiraCheckNow('proj-1');
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_CreateTaskRequest, { taskId: 'task-2' });
+    await promise;
+
+    expect(swapTicketLabel).toHaveBeenLastCalledWith(
+      'DEV_IRREG-2139',
+      'REG_AUTOMATED',
+      'REG_AUTOMATED_SUCC',
+    );
+    stopWatchingProject('proj-1');
+  });
+
+  it('rejects and disables the watcher with reason no-credentials on a status-0 JiraApiError', async () => {
+    vi.mocked(queryLabeledTickets).mockRejectedValue(
+      new JiraApiError(0, 'Jira credentials are not set'),
+    );
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    __resetJiraWatcherForTests();
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+
+    await expect(triggerJiraCheckNow('proj-1')).rejects.toThrow();
+    const state = getJiraWatcherStateForTests();
+    expect(state.disabled).toBe(true);
+    expect(state.disabledReason).toBe('no-credentials');
+    stopWatchingProject('proj-1');
+  });
+
+  it('rejects and disables the watcher with reason auth on a 401 JiraApiError', async () => {
+    vi.mocked(queryLabeledTickets).mockResolvedValue([]);
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+
+    vi.mocked(queryLabeledTickets).mockRejectedValue(new JiraApiError(401, 'Unauthorized'));
+    await expect(triggerJiraCheckNow('proj-1')).rejects.toThrow();
+    const state = getJiraWatcherStateForTests();
+    expect(state.disabled).toBe(true);
+    expect(state.disabledReason).toBe('auth');
+    stopWatchingProject('proj-1');
+  });
+
+  it('is a no-op for a second concurrent call to the same project while the first is in flight', async () => {
+    let resolveQuery: ((v: Array<{ key: string; summary: string }>) => void) | undefined;
+    vi.mocked(queryLabeledTickets).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveQuery = resolve;
+        }),
+    );
+
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+
+    resolveQuery?.([]);
+    await flushPromises();
+
+    vi.mocked(queryLabeledTickets).mockClear();
+    vi.mocked(queryLabeledTickets).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveQuery = resolve;
+        }),
+    );
+
+    const first = triggerJiraCheckNow('proj-1');
+    const second = triggerJiraCheckNow('proj-1');
+
+    expect(queryLabeledTickets).toHaveBeenCalledTimes(1);
+
+    resolveQuery?.([]);
+    await Promise.all([first, second]);
     stopWatchingProject('proj-1');
   });
 });
