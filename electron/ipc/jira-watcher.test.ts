@@ -270,11 +270,10 @@ describe('watcher tick', () => {
     vi.mocked(swapTicketLabel).mockReset();
   });
 
-  it('spawns a task for a newly labeled ticket, then swaps its label', async () => {
+  it('enqueues a newly labeled ticket, creates the Implementer task once, then prompts it with /myl3', async () => {
     vi.mocked(queryLabeledTickets).mockResolvedValue([
       { key: 'DEV_IRREG-1234', summary: 'Fix the thing' },
     ]);
-    vi.mocked(swapTicketLabel).mockResolvedValue(undefined);
 
     const sent: Array<{ channel: string; payload: unknown }> = [];
     const win = fakeWindow(sent);
@@ -284,23 +283,76 @@ describe('watcher tick', () => {
       jiraProjectKey: 'DEV_IRREG',
       jiraTriggerLabel: 'REG_AUTOMATED',
       jiraCompletedLabel: 'REG_AUTOMATED_SUCC',
+      jiraDefaultReviewers: '@avnair @spummer',
     });
 
     await flushPromises();
     replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
-
     await flushPromises();
-    const createReq = sent.filter((s) => s.channel === IPC.JiraWatcher_CreateTaskRequest).pop();
-    expect(createReq).toBeDefined();
-    expect((createReq?.payload as { name: string }).name).toBe('DEV_IRREG-1234: Fix the thing');
-    replyToLatest(sent, IPC.JiraWatcher_CreateTaskRequest, { taskId: 'task-999' });
 
+    // No task was created yet for the ticket directly -- the Implementer
+    // task is created once, generically, not per-ticket.
+    expect(sent.some((s) => s.channel === IPC.JiraWatcher_CreateTaskRequest)).toBe(false);
+
+    const ensureReq = sent
+      .filter((s) => s.channel === IPC.JiraWatcher_EnsureImplementerTaskRequest)
+      .pop();
+    expect(ensureReq).toBeDefined();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+    });
     await flushPromises();
-    expect(swapTicketLabel).toHaveBeenCalledWith(
-      'DEV_IRREG-1234',
-      'REG_AUTOMATED',
-      'REG_AUTOMATED_SUCC',
-    );
+
+    const promptReq = sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest).pop();
+    expect(promptReq).toBeDefined();
+    expect(promptReq?.payload).toMatchObject({
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+      text: '/myl3 DEV_IRREG-1234 @avnair @spummer',
+    });
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
+    await flushPromises();
+
+    stopWatchingProject('proj-1');
+  });
+
+  it('leaves a ticket queued (does not prompt again) while the Implementer is already busy with a prior ticket', async () => {
+    vi.mocked(queryLabeledTickets).mockResolvedValueOnce([{ key: 'DEV_IRREG-1', summary: 'First' }]);
+
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+    });
+    await flushPromises();
+    // First ticket's prompt is in flight (promptAgent request sent, not yet replied) --
+    // this represents "Implementer busy."
+    expect(sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest)).toHaveLength(1);
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
+    await flushPromises();
+
+    sent.length = 0;
+    vi.mocked(queryLabeledTickets).mockResolvedValueOnce([
+      { key: 'DEV_IRREG-1', summary: 'First' },
+      { key: 'DEV_IRREG-2', summary: 'Second' },
+    ]);
+    void __runJiraTickForTests();
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
+    await flushPromises();
+
+    // DEV_IRREG-2 is new and gets queued, but no second promptAgent fires --
+    // the Implementer is still busy with DEV_IRREG-1's in-flight prompt.
+    expect(getProjectQueueStateForTests('proj-1')?.implementQueue).toEqual(['DEV_IRREG-2']);
+    expect(sent.some((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest)).toBe(false);
+
     stopWatchingProject('proj-1');
   });
 
@@ -441,7 +493,7 @@ describe('triggerJiraCheckNow', () => {
     vi.mocked(swapTicketLabel).mockReset();
   });
 
-  it('finds a ticket, creates a task, and swaps its label on the happy path', async () => {
+  it('finds a ticket, enqueues + prompts it, and swaps its label on the happy path', async () => {
     vi.mocked(queryLabeledTickets).mockResolvedValue([
       { key: 'DEV_IRREG-2139', summary: 'Manual trigger check' },
     ]);
@@ -454,26 +506,35 @@ describe('triggerJiraCheckNow', () => {
     await flushPromises();
     replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
     await flushPromises();
-    replyToLatest(sent, IPC.JiraWatcher_CreateTaskRequest, { taskId: 'task-1' });
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+    });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
     await flushPromises();
 
-    sent.length = 0;
-    vi.mocked(queryLabeledTickets).mockResolvedValue([
-      { key: 'DEV_IRREG-2139', summary: 'Manual trigger check' },
-    ]);
-
-    const promise = triggerJiraCheckNow('proj-1');
-    await flushPromises();
-    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
-    await flushPromises();
-    replyToLatest(sent, IPC.JiraWatcher_CreateTaskRequest, { taskId: 'task-2' });
-    await promise;
-
-    expect(swapTicketLabel).toHaveBeenLastCalledWith(
+    expect(swapTicketLabel).toHaveBeenCalledWith(
       'DEV_IRREG-2139',
       'REG_AUTOMATED',
       'REG_AUTOMATED_SUCC',
     );
+
+    // Second (manual) trigger while the ticket is still "in progress" from
+    // the Implementer's point of view (its waitForAgentReady call hasn't
+    // resolved yet): implementCurrentTicket now recognizes it and the
+    // discovery loop skips it entirely -- no listTaskNames round-trip, no
+    // re-enqueue, no second label swap or prompt.
+    sent.length = 0;
+    vi.mocked(swapTicketLabel).mockClear();
+    vi.mocked(queryLabeledTickets).mockResolvedValue([
+      { key: 'DEV_IRREG-2139', summary: 'Manual trigger check' },
+    ]);
+
+    await triggerJiraCheckNow('proj-1');
+
+    expect(swapTicketLabel).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
     stopWatchingProject('proj-1');
   });
 

@@ -135,6 +135,10 @@ interface WatchedProject {
   jiraProjectKey: string;
   triggerLabel: string;
   completedLabel: string;
+  /** Default reviewers string (e.g. "@avnair @spummer") passed verbatim as
+   *  myl3's `reviewers` argument for every auto-queued ticket. Empty string
+   *  if unset -- myl3 still runs but without named reviewers on the MR. */
+  defaultReviewers: string;
 }
 
 interface ProjectQueue {
@@ -142,6 +146,10 @@ interface ProjectQueue {
    *  the ticket currently being worked -- that one has already been dequeued
    *  and handed to myl3 via promptAgent; this array is only "not yet started". */
   implementQueue: string[];
+  /** Ticket key currently dequeued and being worked (via promptAgent), if any.
+   *  Distinct from implementQueue (not-yet-started tickets) -- prevents
+   *  rediscovering this ticket from re-enqueuing it. */
+  implementCurrentTicket: string | null;
   /** Set once ensureImplementerTask's create-task round-trip resolves. Reused
    *  on every subsequent refill so the window is created at most once per
    *  project. */
@@ -157,6 +165,7 @@ interface ProjectQueue {
 function emptyProjectQueue(): ProjectQueue {
   return {
     implementQueue: [],
+    implementCurrentTicket: null,
     implementTaskId: null,
     implementAgentId: null,
     deployTaskId: null,
@@ -210,6 +219,7 @@ export function startWatchingProject(project: {
   jiraProjectKey?: string;
   jiraTriggerLabel?: string;
   jiraCompletedLabel?: string;
+  jiraDefaultReviewers?: string;
 }): void {
   if (jiraDisabled) return;
   watched.set(project.id, {
@@ -217,6 +227,7 @@ export function startWatchingProject(project: {
     jiraProjectKey: project.jiraProjectKey ?? '',
     triggerLabel: project.jiraTriggerLabel ?? DEFAULT_TRIGGER_LABEL,
     completedLabel: project.jiraCompletedLabel ?? DEFAULT_COMPLETED_LABEL,
+    defaultReviewers: project.jiraDefaultReviewers ?? '',
   });
   if (!projectQueues.has(project.id)) {
     projectQueues.set(project.id, emptyProjectQueue());
@@ -290,6 +301,11 @@ async function pollOneProject(projectId: string): Promise<void> {
     const tickets = await queryLabeledTickets(entry.jiraProjectKey, entry.triggerLabel);
 
     for (const ticket of tickets) {
+      const queue = projectQueues.get(projectId);
+      if (!queue) continue; // project stopped watching mid-poll
+      if (queue.implementCurrentTicket === ticket.key) continue; // already in progress
+      if (queue.implementQueue.includes(ticket.key)) continue; // already queued
+
       let existingNames: string[];
       try {
         existingNames = await jiraBridge.listTaskNames(projectId);
@@ -299,18 +315,7 @@ async function pollOneProject(projectId: string): Promise<void> {
       }
       if (hasTicketKey(existingNames, ticket.key)) continue;
 
-      let created: { taskId: string };
-      try {
-        created = await jiraBridge.createTask({
-          projectId,
-          name: buildTaskName(ticket.key, ticket.summary),
-          prompt: `Implement ${ticket.key}: ${ticket.summary}`,
-        });
-      } catch (err) {
-        console.warn('[jira-watcher] createTask failed for', ticket.key, err);
-        continue;
-      }
-      void created; // taskId not currently used further, but kept for future logging/telemetry
+      queue.implementQueue.push(ticket.key);
 
       try {
         await swapTicketLabel(ticket.key, entry.triggerLabel, entry.completedLabel);
@@ -319,8 +324,61 @@ async function pollOneProject(projectId: string): Promise<void> {
         // Ticket keeps triggerLabel — caught by the hasTicketKey check next tick.
       }
     }
+
+    await refillImplementerIfIdle(projectId);
   } finally {
     pollingProjectIds.delete(projectId);
+  }
+}
+
+/** Per-project re-entrancy guard so two overlapping refill attempts (e.g. a
+ *  poll tick firing while a previous refill's ensureImplementerTask call is
+ *  still in flight) never both dequeue+prompt. */
+const implementerBusy = new Set<string>();
+
+async function refillImplementerIfIdle(projectId: string): Promise<void> {
+  const queue = projectQueues.get(projectId);
+  if (!queue || !jiraBridge) return;
+  if (queue.implementQueue.length === 0) return;
+  if (implementerBusy.has(projectId)) return;
+  implementerBusy.add(projectId);
+
+  try {
+    if (!queue.implementTaskId || !queue.implementAgentId) {
+      const created = await jiraBridge.ensureImplementerTask(projectId);
+      queue.implementTaskId = created.taskId;
+      queue.implementAgentId = created.agentId;
+    }
+    const ticketKey = queue.implementQueue.shift();
+    if (!ticketKey) return; // queue drained by another path between the checks above and here
+    queue.implementCurrentTicket = ticketKey;
+
+    const watchedEntry = watched.get(projectId);
+    const reviewers = watchedEntry?.defaultReviewers ?? '';
+    const promptText = reviewers ? `/myl3 ${ticketKey} ${reviewers}` : `/myl3 ${ticketKey}`;
+
+    await jiraBridge.promptAgent(queue.implementTaskId, queue.implementAgentId, promptText);
+
+    // Re-arm for the NEXT ticket once this one finishes. Deliberately not
+    // awaited inline here -- waitForAgentReady can stay pending for the
+    // ticket's entire run, and refillImplementerIfIdle must return promptly
+    // so the poll tick that called it isn't blocked for that whole duration.
+    void jiraBridge
+      .waitForAgentReady(queue.implementAgentId)
+      .then(() => {
+        implementerBusy.delete(projectId);
+        queue.implementCurrentTicket = null;
+        return refillImplementerIfIdle(projectId);
+      })
+      .catch((err) => {
+        implementerBusy.delete(projectId);
+        queue.implementCurrentTicket = null;
+        console.warn('[jira-watcher] waitForAgentReady failed for', projectId, err);
+      });
+  } catch (err) {
+    implementerBusy.delete(projectId);
+    queue.implementCurrentTicket = null;
+    console.warn('[jira-watcher] refillImplementerIfIdle failed for', projectId, err);
   }
 }
 
@@ -374,6 +432,8 @@ export function __resetJiraWatcherForTests(): void {
   jiraIsPolling = false;
   jiraDisabled = false;
   jiraDisabledReason = null;
+  pollingProjectIds.clear();
+  implementerBusy.clear();
 }
 
 /** Runs one scheduled tick synchronously, the way the interval callback would.
