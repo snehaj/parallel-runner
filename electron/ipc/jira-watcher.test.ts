@@ -634,3 +634,90 @@ describe('ProjectQueue lifecycle', () => {
     expect(getProjectQueueStateForTests('proj-1')).toBeUndefined();
   });
 });
+
+describe('Deployer refill', () => {
+  beforeEach(() => {
+    __resetJiraWatcherForTests();
+    vi.mocked(queryLabeledTickets).mockReset();
+    vi.mocked(queryLabeledTickets).mockResolvedValue([]); // no new tickets to discover this test
+  });
+
+  it('creates the Deployer task once and prompts it with /pipeline-deploy on each idle poll', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+
+    await flushPromises();
+
+    const ensureReq = sent
+      .filter((s) => s.channel === IPC.JiraWatcher_EnsureDeployerTaskRequest)
+      .pop();
+    expect(ensureReq).toBeDefined();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureDeployerTaskRequest, {
+      taskId: 'deploy-task-1',
+      agentId: 'deploy-agent-1',
+    });
+    await flushPromises();
+
+    const promptReq = sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest).pop();
+    expect(promptReq?.payload).toMatchObject({
+      taskId: 'deploy-task-1',
+      agentId: 'deploy-agent-1',
+      text: '/pipeline-deploy',
+    });
+
+    stopWatchingProject('proj-1');
+  });
+
+  it('does not send a second /pipeline-deploy prompt while the Deployer is still busy', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureDeployerTaskRequest, {
+      taskId: 'deploy-task-1',
+      agentId: 'deploy-agent-1',
+    });
+    await flushPromises();
+    expect(sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest)).toHaveLength(1);
+    // Deliberately not replying to the PromptAgentRequest -- represents
+    // "Deployer still running this pass."
+
+    sent.length = 0;
+    await __runJiraTickForTests();
+    await flushPromises();
+
+    expect(sent.some((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest)).toBe(false);
+    stopWatchingProject('proj-1');
+  });
+
+  it('sends the next /pipeline-deploy prompt once the previous pass goes idle again', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureDeployerTaskRequest, {
+      taskId: 'deploy-task-1',
+      agentId: 'deploy-agent-1',
+    });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
+    await flushPromises();
+
+    // waitForAgentReady's request was sent as part of arming the next refill --
+    // replying to it simulates the agent going idle again.
+    replyToLatest(sent, IPC.JiraWatcher_WaitForAgentReadyRequest, undefined);
+    await flushPromises();
+
+    sent.length = 0;
+    await __runJiraTickForTests();
+    await flushPromises();
+
+    const promptReq = sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest).pop();
+    expect(promptReq?.payload).toMatchObject({ text: '/pipeline-deploy' });
+    stopWatchingProject('proj-1');
+  });
+});

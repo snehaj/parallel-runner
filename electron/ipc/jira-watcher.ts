@@ -326,6 +326,7 @@ async function pollOneProject(projectId: string): Promise<void> {
     }
 
     await refillImplementerIfIdle(projectId);
+    void refillDeployerIfIdle(projectId);
   } finally {
     pollingProjectIds.delete(projectId);
   }
@@ -382,6 +383,49 @@ async function refillImplementerIfIdle(projectId: string): Promise<void> {
   }
 }
 
+/** Per-project re-entrancy guard: protects deployer bootstrap+prompt from
+ *  overlapping across concurrent refill attempts, same rationale as
+ *  implementerBusy above. */
+const deployerBusy = new Set<string>();
+
+async function refillDeployerIfIdle(projectId: string): Promise<void> {
+  const queue = projectQueues.get(projectId);
+  if (!queue || !jiraBridge) return;
+  if (deployerBusy.has(projectId)) return;
+  deployerBusy.add(projectId);
+
+  try {
+    if (!queue.deployTaskId || !queue.deployAgentId) {
+      const created = await jiraBridge.ensureDeployerTask(projectId);
+      queue.deployTaskId = created.taskId;
+      queue.deployAgentId = created.agentId;
+    }
+
+    await jiraBridge.promptAgent(queue.deployTaskId, queue.deployAgentId, '/pipeline-deploy');
+
+    // Same "don't await inline" reasoning as refillImplementerIfIdle: a
+    // deploy pass can run long, and this function must return promptly so
+    // the calling poll tick isn't blocked.
+    void jiraBridge
+      .waitForAgentReady(queue.deployAgentId)
+      .then(() => {
+        deployerBusy.delete(projectId);
+        // No unconditional re-arm here -- unlike the Implementer (which has
+        // an explicit queue to drain), the Deployer's next prompt is sent by
+        // the NEXT poll tick / Check-Jira-Now call reaching this function
+        // again, not by this callback re-triggering itself. This matches the
+        // design's "same cadence as the Implementer's poll" refill rule.
+      })
+      .catch((err) => {
+        deployerBusy.delete(projectId);
+        console.warn('[jira-watcher] Deployer waitForAgentReady failed for', projectId, err);
+      });
+  } catch (err) {
+    deployerBusy.delete(projectId);
+    console.warn('[jira-watcher] refillDeployerIfIdle failed for', projectId, err);
+  }
+}
+
 /** Public: manually trigger a single-project poll outside the scheduled tick.
  *  Unlike runJiraTick's call sites (which swallow via .catch(handleJiraError)),
  *  this rethrows after handleJiraError so the UI can surface the failure. */
@@ -434,6 +478,7 @@ export function __resetJiraWatcherForTests(): void {
   jiraDisabledReason = null;
   pollingProjectIds.clear();
   implementerBusy.clear();
+  deployerBusy.clear();
 }
 
 /** Runs one scheduled tick synchronously, the way the interval callback would.
