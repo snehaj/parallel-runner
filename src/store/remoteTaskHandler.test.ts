@@ -559,14 +559,40 @@ describe('Jira watcher persistent-task bridge handlers', () => {
     );
   });
 
-  it('WaitForAgentReady registers onAgentReady and replies ok once it fires', () => {
-    listenerFor(IPC.JiraWatcher_WaitForAgentReadyRequest)?.({ reqId: 'r5', agentId: 'a1' });
+  it('WaitForAgentReady delegates to waitUntilAgentReadyForPrompt (which has its own polling fallback) rather than raw onAgentReady, and replies ok once it resolves', async () => {
+    // Regression test: handleWaitForAgentReady used to call onAgentReady
+    // directly -- a one-shot callback that only fires on NEW PTY output.
+    // jira-watcher.ts calls this after a ticket finishes to detect "safe to
+    // send the next one"; if myl3's Claude Code session settles at its idle
+    // prompt and produces no FURTHER output after that point, the callback
+    // never fires again and the Implementer/Deployer sits there forever,
+    // never picking up its next ticket -- reproduced live after myl3
+    // completed DEV_IRREG-2176. waitUntilAgentReadyForPrompt already has the
+    // same polling fallback promptAgent's own readiness wait uses (added in
+    // 420c22e for the identical failure mode on the OTHER caller of this
+    // pattern); this handler must reuse it, not keep its own copy that
+    // lacks it.
+    let resolveReady: () => void = () => {};
+    mockWaitUntilAgentReadyForPrompt.mockImplementation(
+      () => new Promise<void>((resolve) => (resolveReady = resolve)),
+    );
 
-    expect(mockOnAgentReady).toHaveBeenCalledWith('a1', expect.any(Function));
+    listenerFor(IPC.JiraWatcher_WaitForAgentReadyRequest)?.({ reqId: 'r5', agentId: 'a1' });
+    await Promise.resolve();
+
+    expect(mockWaitUntilAgentReadyForPrompt).toHaveBeenCalledWith(
+      'a1',
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Object),
+    );
+    expect(mockOnAgentReady).not.toHaveBeenCalled();
     expect(mockInvoke).not.toHaveBeenCalled(); // not replied yet -- still waiting
 
-    const registeredCallback = mockOnAgentReady.mock.calls[0][1] as () => void;
-    registeredCallback();
+    resolveReady();
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(mockInvoke).toHaveBeenCalledWith(
       IPC.JiraWatcher_RendererReply,
