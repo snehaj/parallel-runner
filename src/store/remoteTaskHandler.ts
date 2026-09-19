@@ -14,12 +14,14 @@ import type { GitIgnoredEntry } from '../ipc/types';
 
 /** Same stability-check tuning PromptInput.tsx's autofire path uses for
  *  manually-created tasks (PROMPT_STABILITY_CHECKS / PROMPT_RECHECK_DELAY_MS /
- *  STABILITY_MAX_FAILURES) -- kept in sync deliberately rather than imported,
- *  since PromptInput.tsx's constants are private to its own auto-send effect. */
+ *  STABILITY_MAX_FAILURES / QUIESCENCE_POLL_MS) -- kept in sync deliberately
+ *  rather than imported, since PromptInput.tsx's constants are private to
+ *  its own auto-send effect. */
 const AGENT_READY_WAIT_OPTS = {
   stabilityChecks: 2,
   recheckDelayMs: 1_500,
   maxStabilityFailures: 3,
+  pollIntervalMs: 500,
 };
 
 function sleep(ms: number): Promise<void> {
