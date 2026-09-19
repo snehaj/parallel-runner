@@ -38,6 +38,7 @@ import {
   stopWatchingProject,
   triggerJiraCheckNow,
   getJiraWatcherStateForTests,
+  getProjectQueueStateForTests,
   __resetJiraWatcherForTests,
   __runJiraTickForTests,
 } from './jira-watcher.js';
@@ -150,6 +151,118 @@ describe('initJiraWatcherBridge', () => {
   });
 });
 
+describe('initJiraWatcherBridge — persistent task methods', () => {
+  it('ensureImplementerTask sends a request and resolves with {taskId, agentId}', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    const bridge = initJiraWatcherBridge(win);
+
+    const promise = bridge.ensureImplementerTask('proj-1');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].channel).toBe(IPC.JiraWatcher_EnsureImplementerTaskRequest);
+    const reqId = (sent[0].payload as { reqId: string }).reqId;
+
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, { reqId, ok: true, data: { taskId: 'task-1', agentId: 'agent-1' } });
+
+    await expect(promise).resolves.toEqual({ taskId: 'task-1', agentId: 'agent-1' });
+  });
+
+  it('ensureDeployerTask sends its own distinct request channel', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    const bridge = initJiraWatcherBridge(win);
+
+    const promise = bridge.ensureDeployerTask('proj-1');
+    expect(sent[0].channel).toBe(IPC.JiraWatcher_EnsureDeployerTaskRequest);
+    const reqId = (sent[0].payload as { reqId: string }).reqId;
+
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, { reqId, ok: true, data: { taskId: 'task-2', agentId: 'agent-2' } });
+
+    await expect(promise).resolves.toEqual({ taskId: 'task-2', agentId: 'agent-2' });
+  });
+
+  it('promptAgent sends taskId/agentId/text and resolves on an ok reply', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    const bridge = initJiraWatcherBridge(win);
+
+    const promise = bridge.promptAgent('task-1', 'agent-1', '/myl3 DEV_IRREG-1 @a');
+    expect(sent[0].channel).toBe(IPC.JiraWatcher_PromptAgentRequest);
+    expect(sent[0].payload).toMatchObject({
+      taskId: 'task-1',
+      agentId: 'agent-1',
+      text: '/myl3 DEV_IRREG-1 @a',
+    });
+    const reqId = (sent[0].payload as { reqId: string }).reqId;
+
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, { reqId, ok: true, data: undefined });
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it('waitForAgentReady sends agentId and resolves once, with no fixed timeout applied', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    const bridge = initJiraWatcherBridge(win);
+
+    const promise = bridge.waitForAgentReady('agent-1');
+    expect(sent[0].channel).toBe(IPC.JiraWatcher_WaitForAgentReadyRequest);
+    expect(sent[0].payload).toMatchObject({ agentId: 'agent-1' });
+    const reqId = (sent[0].payload as { reqId: string }).reqId;
+
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, { reqId, ok: true, data: undefined });
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it('promptAgent rejects immediately if the window is destroyed', async () => {
+    const win = { isDestroyed: () => true } as unknown as import('electron').BrowserWindow;
+    const bridge = initJiraWatcherBridge(win);
+    await expect(bridge.promptAgent('t', 'a', 'text')).rejects.toThrow(
+      'Desktop app is not available',
+    );
+  });
+
+  it('waitForAgentReady does not time out even after the default 120s window (uses no timeout)', async () => {
+    vi.useFakeTimers();
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    const bridge = initJiraWatcherBridge(win);
+
+    const promise = bridge.waitForAgentReady('agent-1');
+    let settled = false;
+    promise.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+
+    vi.advanceTimersByTime(200_000); // well past the normal 120s callRenderer timeout
+    await Promise.resolve();
+    expect(settled).toBe(false); // still pending -- no spurious timeout rejection
+
+    const reqId = (sent[0].payload as { reqId: string }).reqId;
+    const replyHandler = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+    ).__handlers.get(IPC.JiraWatcher_RendererReply);
+    replyHandler?.(null, { reqId, ok: true, data: undefined });
+
+    await expect(promise).resolves.toBeUndefined();
+    vi.useRealTimers();
+  });
+});
+
 describe('watcher tick', () => {
   beforeEach(() => {
     __resetJiraWatcherForTests();
@@ -157,11 +270,10 @@ describe('watcher tick', () => {
     vi.mocked(swapTicketLabel).mockReset();
   });
 
-  it('spawns a task for a newly labeled ticket, then swaps its label', async () => {
+  it('enqueues a newly labeled ticket, creates the Implementer task once, then prompts it with /myl3', async () => {
     vi.mocked(queryLabeledTickets).mockResolvedValue([
       { key: 'DEV_IRREG-1234', summary: 'Fix the thing' },
     ]);
-    vi.mocked(swapTicketLabel).mockResolvedValue(undefined);
 
     const sent: Array<{ channel: string; payload: unknown }> = [];
     const win = fakeWindow(sent);
@@ -171,23 +283,76 @@ describe('watcher tick', () => {
       jiraProjectKey: 'DEV_IRREG',
       jiraTriggerLabel: 'REG_AUTOMATED',
       jiraCompletedLabel: 'REG_AUTOMATED_SUCC',
+      jiraDefaultReviewers: '@avnair @spummer',
     });
 
     await flushPromises();
     replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
-
     await flushPromises();
-    const createReq = sent.filter((s) => s.channel === IPC.JiraWatcher_CreateTaskRequest).pop();
-    expect(createReq).toBeDefined();
-    expect((createReq?.payload as { name: string }).name).toBe('DEV_IRREG-1234: Fix the thing');
-    replyToLatest(sent, IPC.JiraWatcher_CreateTaskRequest, { taskId: 'task-999' });
 
+    // No task was created yet for the ticket directly -- the Implementer
+    // task is created once, generically, not per-ticket.
+    expect(sent.some((s) => s.channel === IPC.JiraWatcher_CreateTaskRequest)).toBe(false);
+
+    const ensureReq = sent
+      .filter((s) => s.channel === IPC.JiraWatcher_EnsureImplementerTaskRequest)
+      .pop();
+    expect(ensureReq).toBeDefined();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+    });
     await flushPromises();
-    expect(swapTicketLabel).toHaveBeenCalledWith(
-      'DEV_IRREG-1234',
-      'REG_AUTOMATED',
-      'REG_AUTOMATED_SUCC',
-    );
+
+    const promptReq = sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest).pop();
+    expect(promptReq).toBeDefined();
+    expect(promptReq?.payload).toMatchObject({
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+      text: '/myl3 DEV_IRREG-1234 @avnair @spummer',
+    });
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
+    await flushPromises();
+
+    stopWatchingProject('proj-1');
+  });
+
+  it('leaves a ticket queued (does not prompt again) while the Implementer is already busy with a prior ticket', async () => {
+    vi.mocked(queryLabeledTickets).mockResolvedValueOnce([{ key: 'DEV_IRREG-1', summary: 'First' }]);
+
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+    });
+    await flushPromises();
+    // First ticket's prompt is in flight (promptAgent request sent, not yet replied) --
+    // this represents "Implementer busy."
+    expect(sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest)).toHaveLength(1);
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
+    await flushPromises();
+
+    sent.length = 0;
+    vi.mocked(queryLabeledTickets).mockResolvedValueOnce([
+      { key: 'DEV_IRREG-1', summary: 'First' },
+      { key: 'DEV_IRREG-2', summary: 'Second' },
+    ]);
+    void __runJiraTickForTests();
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
+    await flushPromises();
+
+    // DEV_IRREG-2 is new and gets queued, but no second promptAgent fires --
+    // the Implementer is still busy with DEV_IRREG-1's in-flight prompt.
+    expect(getProjectQueueStateForTests('proj-1')?.implementQueue).toEqual(['DEV_IRREG-2']);
+    expect(sent.some((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest)).toBe(false);
+
     stopWatchingProject('proj-1');
   });
 
@@ -328,7 +493,7 @@ describe('triggerJiraCheckNow', () => {
     vi.mocked(swapTicketLabel).mockReset();
   });
 
-  it('finds a ticket, creates a task, and swaps its label on the happy path', async () => {
+  it('finds a ticket, enqueues + prompts it, and swaps its label on the happy path', async () => {
     vi.mocked(queryLabeledTickets).mockResolvedValue([
       { key: 'DEV_IRREG-2139', summary: 'Manual trigger check' },
     ]);
@@ -341,26 +506,35 @@ describe('triggerJiraCheckNow', () => {
     await flushPromises();
     replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
     await flushPromises();
-    replyToLatest(sent, IPC.JiraWatcher_CreateTaskRequest, { taskId: 'task-1' });
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+    });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
     await flushPromises();
 
-    sent.length = 0;
-    vi.mocked(queryLabeledTickets).mockResolvedValue([
-      { key: 'DEV_IRREG-2139', summary: 'Manual trigger check' },
-    ]);
-
-    const promise = triggerJiraCheckNow('proj-1');
-    await flushPromises();
-    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
-    await flushPromises();
-    replyToLatest(sent, IPC.JiraWatcher_CreateTaskRequest, { taskId: 'task-2' });
-    await promise;
-
-    expect(swapTicketLabel).toHaveBeenLastCalledWith(
+    expect(swapTicketLabel).toHaveBeenCalledWith(
       'DEV_IRREG-2139',
       'REG_AUTOMATED',
       'REG_AUTOMATED_SUCC',
     );
+
+    // Second (manual) trigger while the ticket is still "in progress" from
+    // the Implementer's point of view (its waitForAgentReady call hasn't
+    // resolved yet): implementCurrentTicket now recognizes it and the
+    // discovery loop skips it entirely -- no listTaskNames round-trip, no
+    // re-enqueue, no second label swap or prompt.
+    sent.length = 0;
+    vi.mocked(swapTicketLabel).mockClear();
+    vi.mocked(queryLabeledTickets).mockResolvedValue([
+      { key: 'DEV_IRREG-2139', summary: 'Manual trigger check' },
+    ]);
+
+    await triggerJiraCheckNow('proj-1');
+
+    expect(swapTicketLabel).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
     stopWatchingProject('proj-1');
   });
 
@@ -431,6 +605,173 @@ describe('triggerJiraCheckNow', () => {
 
     resolveQuery?.([]);
     await Promise.all([first, second]);
+    stopWatchingProject('proj-1');
+  });
+});
+
+describe('ProjectQueue lifecycle', () => {
+  beforeEach(() => {
+    __resetJiraWatcherForTests();
+  });
+
+  it('has no queue entry for a project that was never started', () => {
+    expect(getProjectQueueStateForTests('proj-1')).toBeUndefined();
+  });
+
+  it('creates an empty implementQueue when a project starts watching', () => {
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    expect(getProjectQueueStateForTests('proj-1')).toEqual({
+      implementQueue: [],
+      implementTaskId: null,
+      deployTaskId: null,
+    });
+    stopWatchingProject('proj-1');
+  });
+
+  // Was "clears the queue entry when the project stops watching" -- stopWatchingProject
+  // used to fully delete the ProjectQueue map entry. That behavior was a bug (it wiped
+  // cached implementTaskId/deployTaskId, causing a duplicate "Jira Implementer"/"Jira
+  // Deployer" task to be minted on re-watch); now it only clears in-flight-work state
+  // (implementQueue/implementCurrentTicket) and preserves the entry itself.
+  it('clears in-flight work but keeps the queue entry when the project stops watching', () => {
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    stopWatchingProject('proj-1');
+    expect(getProjectQueueStateForTests('proj-1')).toEqual({
+      implementQueue: [],
+      implementTaskId: null,
+      deployTaskId: null,
+    });
+  });
+
+  it('preserves cached implementTaskId/deployTaskId across a stop/restart cycle so a re-watch reuses the existing persistent tasks instead of minting duplicates', async () => {
+    vi.mocked(queryLabeledTickets).mockResolvedValue([
+      { key: 'DEV_IRREG-1234', summary: 'Fix the thing' },
+    ]);
+
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+    });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
+    await flushPromises();
+
+    expect(getProjectQueueStateForTests('proj-1')?.implementTaskId).toBe('impl-task-1');
+
+    stopWatchingProject('proj-1');
+    // Re-watching the SAME project id must not reset the cached task ids --
+    // this is the actual Fix 2 assertion: no duplicate task should be minted.
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+
+    expect(getProjectQueueStateForTests('proj-1')).toMatchObject({
+      implementTaskId: 'impl-task-1',
+    });
+
+    sent.length = 0;
+    await flushPromises();
+    expect(sent.some((s) => s.channel === IPC.JiraWatcher_EnsureImplementerTaskRequest)).toBe(
+      false,
+    );
+
+    stopWatchingProject('proj-1');
+  });
+});
+
+describe('Deployer refill', () => {
+  beforeEach(() => {
+    __resetJiraWatcherForTests();
+    vi.mocked(queryLabeledTickets).mockReset();
+    vi.mocked(queryLabeledTickets).mockResolvedValue([]); // no new tickets to discover this test
+  });
+
+  it('creates the Deployer task once and prompts it with /pipeline-deploy on each idle poll', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+
+    await flushPromises();
+
+    const ensureReq = sent
+      .filter((s) => s.channel === IPC.JiraWatcher_EnsureDeployerTaskRequest)
+      .pop();
+    expect(ensureReq).toBeDefined();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureDeployerTaskRequest, {
+      taskId: 'deploy-task-1',
+      agentId: 'deploy-agent-1',
+    });
+    await flushPromises();
+
+    const promptReq = sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest).pop();
+    expect(promptReq?.payload).toMatchObject({
+      taskId: 'deploy-task-1',
+      agentId: 'deploy-agent-1',
+      text: '/pipeline-deploy',
+    });
+
+    stopWatchingProject('proj-1');
+  });
+
+  it('does not send a second /pipeline-deploy prompt while the Deployer is still busy', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureDeployerTaskRequest, {
+      taskId: 'deploy-task-1',
+      agentId: 'deploy-agent-1',
+    });
+    await flushPromises();
+    expect(sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest)).toHaveLength(1);
+    // Deliberately not replying to the PromptAgentRequest -- represents
+    // "Deployer still running this pass."
+
+    sent.length = 0;
+    await __runJiraTickForTests();
+    await flushPromises();
+
+    expect(sent.some((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest)).toBe(false);
+    stopWatchingProject('proj-1');
+  });
+
+  it('sends the next /pipeline-deploy prompt once the previous pass goes idle again', async () => {
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureDeployerTaskRequest, {
+      taskId: 'deploy-task-1',
+      agentId: 'deploy-agent-1',
+    });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
+    await flushPromises();
+
+    // waitForAgentReady's request was sent as part of arming the next refill --
+    // replying to it simulates the agent going idle again.
+    replyToLatest(sent, IPC.JiraWatcher_WaitForAgentReadyRequest, undefined);
+    await flushPromises();
+
+    sent.length = 0;
+    await __runJiraTickForTests();
+    await flushPromises();
+
+    const promptReq = sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest).pop();
+    expect(promptReq?.payload).toMatchObject({ text: '/pipeline-deploy' });
     stopWatchingProject('proj-1');
   });
 });

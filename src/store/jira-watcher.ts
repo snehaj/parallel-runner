@@ -8,6 +8,7 @@ interface WatchedSettings {
   jiraProjectKey?: string;
   jiraTriggerLabel?: string;
   jiraCompletedLabel?: string;
+  jiraDefaultReviewers?: string;
 }
 
 export type JiraWatcherDisabledReason = 'no-credentials' | 'auth';
@@ -57,13 +58,15 @@ export function startJiraWatcherSubscription(): () => void {
         jiraProjectKey: project.jiraProjectKey,
         jiraTriggerLabel: project.jiraTriggerLabel,
         jiraCompletedLabel: project.jiraCompletedLabel,
+        jiraDefaultReviewers: project.jiraDefaultReviewers,
       };
       const prev = active.get(project.id);
       if (
         prev &&
         prev.jiraProjectKey === next.jiraProjectKey &&
         prev.jiraTriggerLabel === next.jiraTriggerLabel &&
-        prev.jiraCompletedLabel === next.jiraCompletedLabel
+        prev.jiraCompletedLabel === next.jiraCompletedLabel &&
+        prev.jiraDefaultReviewers === next.jiraDefaultReviewers
       ) {
         continue;
       }

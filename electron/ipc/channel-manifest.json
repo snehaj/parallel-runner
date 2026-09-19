@@ -152,5 +152,9 @@
   "StartJiraWatcher": "start_jira_watcher",
   "StopJiraWatcher": "stop_jira_watcher",
   "JiraWatcherStatus": "jira_watcher_status",
+  "JiraWatcher_EnsureImplementerTaskRequest": "jira_watcher_ensure_implementer_task_request",
+  "JiraWatcher_EnsureDeployerTaskRequest": "jira_watcher_ensure_deployer_task_request",
+  "JiraWatcher_PromptAgentRequest": "jira_watcher_prompt_agent_request",
+  "JiraWatcher_WaitForAgentReadyRequest": "jira_watcher_wait_for_agent_ready_request",
   "TriggerJiraCheckNow": "trigger_jira_check_now"
 }

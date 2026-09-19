@@ -35,7 +35,7 @@ export function buildTaskName(ticketKey: string, summary: string): string {
 interface PendingRequest {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
-  timer: NodeJS.Timeout;
+  timer: NodeJS.Timeout | undefined;
 }
 
 /** Main-process half of the Jira-watcher's own task-creation bridge — the
@@ -52,23 +52,39 @@ export function initJiraWatcherBridge(win: BrowserWindow): {
     taskId: string;
   }>;
   listTaskNames: (projectId: string) => Promise<string[]>;
+  ensureImplementerTask: (projectId: string) => Promise<{ taskId: string; agentId: string }>;
+  ensureDeployerTask: (projectId: string) => Promise<{ taskId: string; agentId: string }>;
+  promptAgent: (taskId: string, agentId: string, text: string) => Promise<void>;
+  waitForAgentReady: (agentId: string) => Promise<void>;
 } {
   const pending = new Map<string, PendingRequest>();
 
-  function callRenderer<T>(channel: string, payload: Record<string, unknown>): Promise<T> {
+  function callRenderer<T>(
+    channel: string,
+    payload: Record<string, unknown>,
+    timeoutMs = 120_000,
+  ): Promise<T> {
     const reqId = randomUUID();
     return new Promise<T>((resolve, reject) => {
       if (win.isDestroyed()) {
         reject(new Error('Desktop app is not available'));
         return;
       }
-      // Same 120s timeout as the mobile bridge — creating a task builds a
-      // git worktree, which can be slow on large repos.
-      const timer = setTimeout(() => {
-        pending.delete(reqId);
-        reject(new Error('Desktop app did not respond'));
-      }, 120_000);
-      pending.set(reqId, { resolve: resolve as (v: unknown) => void, reject, timer });
+      pending.set(reqId, {
+        resolve: resolve as (v: unknown) => void,
+        reject,
+        // 0 disables the timeout entirely -- waitForAgentReady can legitimately
+        // stay pending for as long as the ticket's own work takes (minutes to
+        // hours), unlike every other bridge call here which is a quick
+        // request/reply round-trip.
+        timer:
+          timeoutMs > 0
+            ? setTimeout(() => {
+                pending.delete(reqId);
+                reject(new Error('Desktop app did not respond'));
+              }, timeoutMs)
+            : undefined,
+      });
       win.webContents.send(channel, { reqId, ...payload });
     });
   }
@@ -78,7 +94,7 @@ export function initJiraWatcherBridge(win: BrowserWindow): {
     (_e, args: { reqId: string; ok: boolean; data?: unknown; error?: string }) => {
       const entry = pending.get(args.reqId);
       if (!entry) return;
-      clearTimeout(entry.timer);
+      if (entry.timer) clearTimeout(entry.timer);
       pending.delete(args.reqId);
       if (args.ok) entry.resolve(args.data);
       else entry.reject(new Error(args.error ?? 'Request failed'));
@@ -91,6 +107,19 @@ export function initJiraWatcherBridge(win: BrowserWindow): {
       callRenderer<{ names: string[] }>(IPC.JiraWatcher_ListTaskNamesRequest, {
         projectId,
       }).then((r) => r.names),
+    ensureImplementerTask: (projectId) =>
+      callRenderer<{ taskId: string; agentId: string }>(
+        IPC.JiraWatcher_EnsureImplementerTaskRequest,
+        { projectId },
+      ),
+    ensureDeployerTask: (projectId) =>
+      callRenderer<{ taskId: string; agentId: string }>(IPC.JiraWatcher_EnsureDeployerTaskRequest, {
+        projectId,
+      }),
+    promptAgent: (taskId, agentId, text) =>
+      callRenderer<undefined>(IPC.JiraWatcher_PromptAgentRequest, { taskId, agentId, text }),
+    waitForAgentReady: (agentId) =>
+      callRenderer<undefined>(IPC.JiraWatcher_WaitForAgentReadyRequest, { agentId }, 0),
   };
 }
 
@@ -106,11 +135,48 @@ interface WatchedProject {
   jiraProjectKey: string;
   triggerLabel: string;
   completedLabel: string;
+  /** Default reviewers string (e.g. "@avnair @spummer") passed verbatim as
+   *  myl3's `reviewers` argument for every auto-queued ticket. Empty string
+   *  if unset -- myl3 still runs but without named reviewers on the MR. */
+  defaultReviewers: string;
+}
+
+interface ProjectQueue {
+  /** Ticket keys waiting for the Implementer window, FIFO. Does not include
+   *  the ticket currently being worked -- that one has already been dequeued
+   *  and handed to myl3 via promptAgent; this array is only "not yet started". */
+  implementQueue: string[];
+  /** Ticket key currently dequeued and being worked (via promptAgent), if any.
+   *  Distinct from implementQueue (not-yet-started tickets) -- prevents
+   *  rediscovering this ticket from re-enqueuing it. */
+  implementCurrentTicket: string | null;
+  /** Set once ensureImplementerTask's create-task round-trip resolves. Reused
+   *  on every subsequent refill so the window is created at most once per
+   *  project. */
+  implementTaskId: string | null;
+  implementAgentId: string | null;
+  /** Set once ensureDeployerTask's create-task round-trip resolves. The
+   *  Deployer has no explicit ticket queue -- see jira-watcher-sequential-
+   *  queue-design.md's "Deployer window" section. */
+  deployTaskId: string | null;
+  deployAgentId: string | null;
+}
+
+function emptyProjectQueue(): ProjectQueue {
+  return {
+    implementQueue: [],
+    implementCurrentTicket: null,
+    implementTaskId: null,
+    implementAgentId: null,
+    deployTaskId: null,
+    deployAgentId: null,
+  };
 }
 
 let jiraWin: BrowserWindow | null = null;
 let jiraBridge: ReturnType<typeof initJiraWatcherBridge> | null = null;
 let watched = new Map<string, WatchedProject>();
+let projectQueues = new Map<string, ProjectQueue>();
 let jiraTickHandle: ReturnType<typeof setInterval> | null = null;
 let jiraIsPolling = false;
 let jiraDisabled = false;
@@ -153,6 +219,7 @@ export function startWatchingProject(project: {
   jiraProjectKey?: string;
   jiraTriggerLabel?: string;
   jiraCompletedLabel?: string;
+  jiraDefaultReviewers?: string;
 }): void {
   if (jiraDisabled) return;
   watched.set(project.id, {
@@ -160,7 +227,11 @@ export function startWatchingProject(project: {
     jiraProjectKey: project.jiraProjectKey ?? '',
     triggerLabel: project.jiraTriggerLabel ?? DEFAULT_TRIGGER_LABEL,
     completedLabel: project.jiraCompletedLabel ?? DEFAULT_COMPLETED_LABEL,
+    defaultReviewers: project.jiraDefaultReviewers ?? '',
   });
+  if (!projectQueues.has(project.id)) {
+    projectQueues.set(project.id, emptyProjectQueue());
+  }
   // Give the renderer an initial state so its badge/settings line isn't blank
   // until the first failure changes something.
   sendJiraStatus();
@@ -181,6 +252,20 @@ function sendJiraStatus(): void {
 
 export function stopWatchingProject(projectId: string): void {
   watched.delete(projectId);
+  // Deliberately do NOT delete the ProjectQueue entry here -- it caches
+  // implementTaskId/implementAgentId/deployTaskId/deployAgentId, which must
+  // survive a stop/restart cycle (e.g. toggling "Watch Jira board" off then
+  // on) so the next refill reuses the existing "Jira Implementer"/"Jira
+  // Deployer" task instead of minting a duplicate. Only clear the
+  // in-flight-work state that shouldn't carry over: not-yet-started tickets
+  // and the "currently in progress" marker (a ticket the Implementer was
+  // mid-way through when watching stopped is no longer being tracked as
+  // in-progress by this project, since polling itself has stopped).
+  const queue = projectQueues.get(projectId);
+  if (queue) {
+    queue.implementQueue = [];
+    queue.implementCurrentTicket = null;
+  }
   if (watched.size === 0) clearJiraTickInterval();
 }
 
@@ -229,6 +314,11 @@ async function pollOneProject(projectId: string): Promise<void> {
     const tickets = await queryLabeledTickets(entry.jiraProjectKey, entry.triggerLabel);
 
     for (const ticket of tickets) {
+      const queue = projectQueues.get(projectId);
+      if (!queue) continue; // project stopped watching mid-poll
+      if (queue.implementCurrentTicket === ticket.key) continue; // already in progress
+      if (queue.implementQueue.includes(ticket.key)) continue; // already queued
+
       let existingNames: string[];
       try {
         existingNames = await jiraBridge.listTaskNames(projectId);
@@ -236,30 +326,123 @@ async function pollOneProject(projectId: string): Promise<void> {
         console.warn('[jira-watcher] listTaskNames failed:', err);
         continue;
       }
+      // Legacy check: catches a pre-migration per-ticket task name (e.g.
+      // "DEV_IRREG-1234: ..."), which the new architecture never creates
+      // (tasks are always named "Jira Implementer"/"Jira Deployer" now).
+      // Kept as a safety net for tickets whose old-style task predates this
+      // branch; remove once no such tasks remain in the field.
       if (hasTicketKey(existingNames, ticket.key)) continue;
 
-      let created: { taskId: string };
-      try {
-        created = await jiraBridge.createTask({
-          projectId,
-          name: buildTaskName(ticket.key, ticket.summary),
-          prompt: `Implement ${ticket.key}: ${ticket.summary}`,
-        });
-      } catch (err) {
-        console.warn('[jira-watcher] createTask failed for', ticket.key, err);
-        continue;
-      }
-      void created; // taskId not currently used further, but kept for future logging/telemetry
+      queue.implementQueue.push(ticket.key);
 
       try {
         await swapTicketLabel(ticket.key, entry.triggerLabel, entry.completedLabel);
       } catch (err) {
         console.warn('[jira-watcher] label swap failed for', ticket.key, err);
-        // Ticket keeps triggerLabel — caught by the hasTicketKey check next tick.
+        // Ticket keeps triggerLabel — caught by the implementCurrentTicket/implementQueue
+        // checks above on the next tick (not hasTicketKey, which only matches
+        // pre-migration per-ticket task names).
       }
     }
+
+    await refillImplementerIfIdle(projectId);
+    void refillDeployerIfIdle(projectId);
   } finally {
     pollingProjectIds.delete(projectId);
+  }
+}
+
+/** Per-project re-entrancy guard so two overlapping refill attempts (e.g. a
+ *  poll tick firing while a previous refill's ensureImplementerTask call is
+ *  still in flight) never both dequeue+prompt. */
+const implementerBusy = new Set<string>();
+
+async function refillImplementerIfIdle(projectId: string): Promise<void> {
+  const queue = projectQueues.get(projectId);
+  if (!queue || !jiraBridge) return;
+  if (queue.implementQueue.length === 0) return;
+  if (implementerBusy.has(projectId)) return;
+  implementerBusy.add(projectId);
+
+  try {
+    if (!queue.implementTaskId || !queue.implementAgentId) {
+      const created = await jiraBridge.ensureImplementerTask(projectId);
+      queue.implementTaskId = created.taskId;
+      queue.implementAgentId = created.agentId;
+    }
+    const ticketKey = queue.implementQueue.shift();
+    if (!ticketKey) return; // queue drained by another path between the checks above and here
+    queue.implementCurrentTicket = ticketKey;
+
+    const watchedEntry = watched.get(projectId);
+    const reviewers = watchedEntry?.defaultReviewers ?? '';
+    const promptText = reviewers ? `/myl3 ${ticketKey} ${reviewers}` : `/myl3 ${ticketKey}`;
+
+    await jiraBridge.promptAgent(queue.implementTaskId, queue.implementAgentId, promptText);
+
+    // Re-arm for the NEXT ticket once this one finishes. Deliberately not
+    // awaited inline here -- waitForAgentReady can stay pending for the
+    // ticket's entire run, and refillImplementerIfIdle must return promptly
+    // so the poll tick that called it isn't blocked for that whole duration.
+    void jiraBridge
+      .waitForAgentReady(queue.implementAgentId)
+      .then(() => {
+        implementerBusy.delete(projectId);
+        queue.implementCurrentTicket = null;
+        return refillImplementerIfIdle(projectId);
+      })
+      .catch((err) => {
+        implementerBusy.delete(projectId);
+        queue.implementCurrentTicket = null;
+        console.warn('[jira-watcher] waitForAgentReady failed for', projectId, err);
+      });
+  } catch (err) {
+    implementerBusy.delete(projectId);
+    queue.implementCurrentTicket = null;
+    console.warn('[jira-watcher] refillImplementerIfIdle failed for', projectId, err);
+  }
+}
+
+/** Per-project re-entrancy guard: protects deployer bootstrap+prompt from
+ *  overlapping across concurrent refill attempts, same rationale as
+ *  implementerBusy above. */
+const deployerBusy = new Set<string>();
+
+async function refillDeployerIfIdle(projectId: string): Promise<void> {
+  const queue = projectQueues.get(projectId);
+  if (!queue || !jiraBridge) return;
+  if (deployerBusy.has(projectId)) return;
+  deployerBusy.add(projectId);
+
+  try {
+    if (!queue.deployTaskId || !queue.deployAgentId) {
+      const created = await jiraBridge.ensureDeployerTask(projectId);
+      queue.deployTaskId = created.taskId;
+      queue.deployAgentId = created.agentId;
+    }
+
+    await jiraBridge.promptAgent(queue.deployTaskId, queue.deployAgentId, '/pipeline-deploy');
+
+    // Same "don't await inline" reasoning as refillImplementerIfIdle: a
+    // deploy pass can run long, and this function must return promptly so
+    // the calling poll tick isn't blocked.
+    void jiraBridge
+      .waitForAgentReady(queue.deployAgentId)
+      .then(() => {
+        deployerBusy.delete(projectId);
+        // No unconditional re-arm here -- unlike the Implementer (which has
+        // an explicit queue to drain), the Deployer's next prompt is sent by
+        // the NEXT poll tick / Check-Jira-Now call reaching this function
+        // again, not by this callback re-triggering itself. This matches the
+        // design's "same cadence as the Implementer's poll" refill rule.
+      })
+      .catch((err) => {
+        deployerBusy.delete(projectId);
+        console.warn('[jira-watcher] Deployer waitForAgentReady failed for', projectId, err);
+      });
+  } catch (err) {
+    deployerBusy.delete(projectId);
+    console.warn('[jira-watcher] refillDeployerIfIdle failed for', projectId, err);
   }
 }
 
@@ -308,10 +491,14 @@ export function __resetJiraWatcherForTests(): void {
   jiraWin = null;
   jiraBridge = null;
   watched = new Map();
+  projectQueues = new Map();
   clearJiraTickInterval();
   jiraIsPolling = false;
   jiraDisabled = false;
   jiraDisabledReason = null;
+  pollingProjectIds.clear();
+  implementerBusy.clear();
+  deployerBusy.clear();
 }
 
 /** Runs one scheduled tick synchronously, the way the interval callback would.
@@ -331,4 +518,17 @@ export function getJiraWatcherStateForTests(): {
     disabledReason: jiraDisabledReason,
     watchedProjectIds: Array.from(watched.keys()),
   };
+}
+
+export function getProjectQueueStateForTests(
+  projectId: string,
+): { implementQueue: string[]; implementTaskId: string | null; deployTaskId: string | null } | undefined {
+  const q = projectQueues.get(projectId);
+  return q
+    ? {
+        implementQueue: [...q.implementQueue],
+        implementTaskId: q.implementTaskId,
+        deployTaskId: q.deployTaskId,
+      }
+    : undefined;
 }
