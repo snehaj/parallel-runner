@@ -334,15 +334,15 @@ async function pollOneProject(projectId: string): Promise<void> {
       if (hasTicketKey(existingNames, ticket.key)) continue;
 
       queue.implementQueue.push(ticket.key);
-
-      try {
-        await swapTicketLabel(ticket.key, entry.triggerLabel, entry.completedLabel);
-      } catch (err) {
-        console.warn('[jira-watcher] label swap failed for', ticket.key, err);
-        // Ticket keeps triggerLabel — caught by the implementCurrentTicket/implementQueue
-        // checks above on the next tick (not hasTicketKey, which only matches
-        // pre-migration per-ticket task names).
-      }
+      // Label swap deliberately deferred to refillImplementerIfIdle, right
+      // after promptAgent confirms delivery -- NOT here on enqueue. Swapping
+      // here would strip triggerLabel before the ticket is actually handed
+      // to the Implementer; if promptAgent's request/reply round-trip never
+      // completes (e.g. the CLI was still booting -- see
+      // agent-send-readiness.ts and the incident that motivated this), the
+      // ticket permanently loses triggerLabel despite never being
+      // implemented, silently falling out of the watcher with no automatic
+      // way back in.
     }
 
     await refillImplementerIfIdle(projectId);
@@ -379,6 +379,21 @@ async function refillImplementerIfIdle(projectId: string): Promise<void> {
     const promptText = reviewers ? `/myl3 ${ticketKey} ${reviewers}` : `/myl3 ${ticketKey}`;
 
     await jiraBridge.promptAgent(queue.implementTaskId, queue.implementAgentId, promptText);
+
+    // Swap the trigger label for the completed label only now that
+    // promptAgent has confirmed the ticket was actually handed to the
+    // Implementer -- see the discovery loop's comment in pollOneProject for
+    // why this must not happen any earlier.
+    if (watchedEntry) {
+      try {
+        await swapTicketLabel(ticketKey, watchedEntry.triggerLabel, watchedEntry.completedLabel);
+      } catch (err) {
+        console.warn('[jira-watcher] label swap failed for', ticketKey, err);
+        // Ticket keeps triggerLabel -- caught by the implementCurrentTicket
+        // check in pollOneProject's discovery loop on the next tick (not
+        // hasTicketKey, which only matches pre-migration per-ticket task names).
+      }
+    }
 
     // Re-arm for the NEXT ticket once this one finishes. Deliberately not
     // awaited inline here -- waitForAgentReady can stay pending for the
@@ -522,7 +537,9 @@ export function getJiraWatcherStateForTests(): {
 
 export function getProjectQueueStateForTests(
   projectId: string,
-): { implementQueue: string[]; implementTaskId: string | null; deployTaskId: string | null } | undefined {
+):
+  | { implementQueue: string[]; implementTaskId: string | null; deployTaskId: string | null }
+  | undefined {
   const q = projectQueues.get(projectId);
   return q
     ? {
