@@ -1,6 +1,7 @@
 import { createEffect, createSignal, onCleanup } from 'solid-js';
 import { store } from './core';
 import { fireAndForget } from '../lib/ipc';
+import { showNotification } from './notification';
 import { IPC } from '../../electron/ipc/channels';
 import type { JiraWatcherStatusPayload } from '../ipc/types';
 
@@ -70,8 +71,20 @@ export function startJiraWatcherSubscription(): () => void {
       ) {
         continue;
       }
+      // Set BEFORE the call (not after it succeeds) so a rejection doesn't
+      // leave this project looking "unsent": the next reactive sync() run
+      // would otherwise see no prev entry, treat the settings as newly
+      // changed, and refire StartJiraWatcher every tick -- spamming the
+      // notification below instead of surfacing it once per real change.
       active.set(project.id, next);
-      fireAndForget(IPC.StartJiraWatcher, { projectId: project.id, ...next });
+      fireAndForget(IPC.StartJiraWatcher, { projectId: project.id, ...next }, (err) => {
+        // startWatchingProject throws when jiraProjectKey is missing/blank
+        // (see jira-watcher.ts's own comment) rather than silently watching
+        // with malformed JQL. Without this callback that rejection was only
+        // ever console.error'd -- the toggle looked like it worked (no error
+        // in the UI) while nothing was ever actually watched.
+        showNotification(err instanceof Error ? err.message : String(err));
+      });
     }
     for (const projectId of [...active.keys()]) {
       if (!seen.has(projectId)) {
