@@ -60,19 +60,43 @@ function baseUrl(): string {
   return isScopedToken() ? JIRA_CLOUD_API_BASE : JIRA_BASE_URL;
 }
 
+// Jira REST calls here are simple JQL/PUT requests with no reason to take
+// long -- bounding them is what stands between a stalled network call and
+// the Implementer/Deployer queue getting stuck on "Checking..." forever.
+// `pollOneProject` awaits this call before its own `finally` can release
+// the `pollingProjectIds` busy guard, so an unbounded fetch() here blocks
+// ticket discovery indefinitely with no error ever surfacing to the UI.
+const JIRA_FETCH_TIMEOUT_MS = 15_000;
+
 async function jiraFetch(path: string, init: RequestInit = {}): Promise<unknown> {
   if (!hasJiraCredentials()) {
     throw new JiraApiError(0, 'Jira credentials are not set');
   }
-  const res = await fetch(`${baseUrl()}${path}`, {
-    ...init,
-    headers: {
-      ...init.headers,
-      Authorization: authHeader(),
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), JIRA_FETCH_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl()}${path}`, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        ...init.headers,
+        Authorization: authHeader(),
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+    });
+  } catch (err) {
+    // Distinguish our own timeout from a caller/network-initiated abort or
+    // any other fetch failure (DNS, ECONNRESET, etc.) so the resulting
+    // error is actionable in logs instead of a bare "aborted".
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`Jira request timed out after ${JIRA_FETCH_TIMEOUT_MS}ms: ${path}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new JiraApiError(res.status, `Jira API ${res.status}: ${body.slice(0, 200)}`);

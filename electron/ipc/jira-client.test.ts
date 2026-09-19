@@ -121,6 +121,34 @@ describe('queryLabeledTickets', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNRESET')));
     await expect(queryLabeledTickets('DEV_IRREG', 'REG_AUTOMATED')).rejects.toThrow('ECONNRESET');
   });
+
+  it('aborts and rejects if the request hangs past the request timeout, instead of ' +
+    'hanging forever -- regression test for the Implementer/Deployer queue getting ' +
+    'permanently stuck on "Checking..." because pollOneProject awaits this call before ' +
+    'its finally block can release the busy guard', async () => {
+    vi.useFakeTimers();
+    // A fetch that never resolves on its own, but does reject if its AbortSignal
+    // fires -- the shape a hung real network call + our own timeout would produce.
+    const fetchMock = vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'));
+        });
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = queryLabeledTickets('DEV_IRREG', 'REG_AUTOMATED');
+    const assertion = expect(pending).rejects.toThrow(/aborted|timed out/i);
+    await vi.runAllTimersAsync();
+    await assertion;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+
+    vi.useRealTimers();
+  });
 });
 
 describe('swapTicketLabel', () => {
