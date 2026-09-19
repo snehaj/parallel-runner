@@ -2,14 +2,23 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { createStore } from 'solid-js/store';
 
-const { mockInvoke, mockCreateTask, mockUpdateTaskNotes, mockSendPrompt, mockOnAgentReady } =
-  vi.hoisted(() => ({
-    mockInvoke: vi.fn(),
-    mockCreateTask: vi.fn(),
-    mockUpdateTaskNotes: vi.fn(),
-    mockSendPrompt: vi.fn(),
-    mockOnAgentReady: vi.fn(),
-  }));
+const {
+  mockInvoke,
+  mockCreateTask,
+  mockUpdateTaskNotes,
+  mockSendPrompt,
+  mockOnAgentReady,
+  mockGetAgentOutputTail,
+  mockWaitUntilAgentReadyForPrompt,
+} = vi.hoisted(() => ({
+  mockInvoke: vi.fn(),
+  mockCreateTask: vi.fn(),
+  mockUpdateTaskNotes: vi.fn(),
+  mockSendPrompt: vi.fn(),
+  mockOnAgentReady: vi.fn(),
+  mockGetAgentOutputTail: vi.fn(),
+  mockWaitUntilAgentReadyForPrompt: vi.fn(),
+}));
 vi.mock('../lib/ipc', () => ({ invoke: mockInvoke }));
 vi.mock('./tasks', () => ({
   createTask: mockCreateTask,
@@ -18,6 +27,10 @@ vi.mock('./tasks', () => ({
 }));
 vi.mock('./taskStatus', () => ({
   onAgentReady: mockOnAgentReady,
+  getAgentOutputTail: mockGetAgentOutputTail,
+}));
+vi.mock('./agent-send-readiness', () => ({
+  waitUntilAgentReadyForPrompt: mockWaitUntilAgentReadyForPrompt,
 }));
 
 import { setStore } from './core';
@@ -261,10 +274,14 @@ describe('Jira watcher persistent-task bridge handlers', () => {
     mockCreateTask.mockReset();
     mockSendPrompt.mockReset();
     mockOnAgentReady.mockReset();
+    mockGetAgentOutputTail.mockReset();
+    mockWaitUntilAgentReadyForPrompt.mockReset();
     mockOn.mockClear();
     // reply() fire-and-forgets a .catch() onto invoke()'s return value, so the
     // mock needs a resolved promise by default (bare vi.fn() returns undefined).
     mockInvoke.mockResolvedValue(undefined);
+    mockGetAgentOutputTail.mockReturnValue('');
+    mockWaitUntilAgentReadyForPrompt.mockResolvedValue(undefined);
     setStore('projects', [{ id: 'proj-1', name: 'P', path: '/p', color: 'red', isGitRepo: true }]);
     setStore('availableAgents', [
       {
@@ -374,12 +391,47 @@ describe('Jira watcher persistent-task bridge handlers', () => {
     });
     await Promise.resolve();
     await Promise.resolve();
+    await Promise.resolve();
 
     expect(mockSendPrompt).toHaveBeenCalledWith('t1', 'a1', '/myl3 DEV_IRREG-1 @a');
     expect(mockInvoke).toHaveBeenCalledWith(
       IPC.JiraWatcher_RendererReply,
       expect.objectContaining({ reqId: 'r3', ok: true }),
     );
+  });
+
+  it('PromptAgent waits for the agent to actually be ready before sending', async () => {
+    // Regression test for the bug where /myl3 <ticket> was written into a
+    // freshly-spawned CLI before it finished booting: the keystrokes landed
+    // on the startup banner and were silently dropped. promptAgent must wait
+    // for readiness (the same gate manually-created tasks already get via
+    // PromptInput.tsx's autofire) before ever calling sendPrompt.
+    const callOrder: string[] = [];
+    mockWaitUntilAgentReadyForPrompt.mockImplementation(async () => {
+      callOrder.push('wait');
+    });
+    mockSendPrompt.mockImplementation(async () => {
+      callOrder.push('send');
+    });
+
+    listenerFor(IPC.JiraWatcher_PromptAgentRequest)?.({
+      reqId: 'r3b',
+      taskId: 't1',
+      agentId: 'a1',
+      text: '/myl3 DEV_IRREG-1 @a',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockWaitUntilAgentReadyForPrompt).toHaveBeenCalledWith(
+      'a1',
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Object),
+    );
+    expect(callOrder).toEqual(['wait', 'send']);
   });
 
   it('PromptAgent replies with ok:false when sendPrompt rejects', async () => {
