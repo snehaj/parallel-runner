@@ -318,7 +318,9 @@ describe('watcher tick', () => {
   });
 
   it('leaves a ticket queued (does not prompt again) while the Implementer is already busy with a prior ticket', async () => {
-    vi.mocked(queryLabeledTickets).mockResolvedValueOnce([{ key: 'DEV_IRREG-1', summary: 'First' }]);
+    vi.mocked(queryLabeledTickets).mockResolvedValueOnce([
+      { key: 'DEV_IRREG-1', summary: 'First' },
+    ]);
 
     const sent: Array<{ channel: string; payload: unknown }> = [];
     const win = fakeWindow(sent);
@@ -535,6 +537,48 @@ describe('triggerJiraCheckNow', () => {
 
     expect(swapTicketLabel).not.toHaveBeenCalled();
     expect(sent).toHaveLength(0);
+    stopWatchingProject('proj-1');
+  });
+
+  it('does not swap the trigger label until promptAgent has actually confirmed delivery', async () => {
+    // Regression test: swapTicketLabel used to fire as soon as a ticket was
+    // enqueued, before promptAgent's request/reply round-trip ever completed.
+    // If the implementer's task window never got the prompt (e.g. it was
+    // still booting -- see agent-send-readiness.ts), the ticket permanently
+    // lost its REG_AUTOMATED label despite never actually being implemented,
+    // silently falling out of the watcher with no way to be picked up again
+    // short of a human noticing and manually relabeling it in Jira.
+    vi.mocked(queryLabeledTickets).mockResolvedValue([
+      { key: 'DEV_IRREG-2178', summary: 'Never actually implemented' },
+    ]);
+    vi.mocked(swapTicketLabel).mockResolvedValue(undefined);
+
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+    });
+    await flushPromises();
+
+    // promptAgent's request went out, but hasn't been replied to yet -- the
+    // label must NOT have been swapped at this point.
+    expect(swapTicketLabel).not.toHaveBeenCalled();
+
+    replyToLatest(sent, IPC.JiraWatcher_PromptAgentRequest, undefined);
+    await flushPromises();
+
+    // Only once promptAgent confirms delivery does the label swap.
+    expect(swapTicketLabel).toHaveBeenCalledWith(
+      'DEV_IRREG-2178',
+      'REG_AUTOMATED',
+      'REG_AUTOMATED_SUCC',
+    );
     stopWatchingProject('proj-1');
   });
 
