@@ -195,6 +195,34 @@ async function ensurePersistentTask(req: EnsureTaskRequest, name: string): Promi
     const project = store.projects.find((p) => p.id === req.projectId);
     if (!project) throw new Error('Project not found');
 
+    // Reuse an existing same-name task for this project if one already
+    // exists in the renderer's own task list. The main process's own
+    // implementTaskId/deployTaskId cache (jira-watcher.ts's ProjectQueue) is
+    // the only other thing that would normally prevent a duplicate, but it
+    // resets to empty on every app/dev-server restart while this task list
+    // survives -- without this check, the very first refill after any
+    // restart always mints a second "Jira Implementer"/"Jira Deployer"
+    // window alongside the still-live original.
+    const existing = store.taskOrder
+      .map((id) => store.tasks[id])
+      .find((task) => task?.projectId === req.projectId && task?.name === name);
+    if (existing) {
+      const existingAgentId = existing.agentIds[0];
+      if (existingAgentId) {
+        reply(
+          req.reqId,
+          true,
+          { taskId: existing.id, agentId: existingAgentId },
+          undefined,
+          IPC.JiraWatcher_RendererReply,
+        );
+        return;
+      }
+      // Falls through to create a fresh task if the existing record somehow
+      // has no agent -- an unexpected but non-fatal state, not worth failing
+      // the whole ensure over.
+    }
+
     const agentDef =
       store.availableAgents.find((a) => a.id === store.lastAgentId) ?? store.availableAgents[0];
     if (!agentDef) throw new Error('No agent configured');
