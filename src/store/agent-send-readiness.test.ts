@@ -41,6 +41,7 @@ describe('waitUntilAgentReadyForPrompt', () => {
         stabilityChecks: 2,
         recheckDelayMs: 1_000,
         maxStabilityFailures: 3,
+        pollIntervalMs: 200,
       },
     );
 
@@ -67,6 +68,7 @@ describe('waitUntilAgentReadyForPrompt', () => {
         stabilityChecks: 1,
         recheckDelayMs: 500,
         maxStabilityFailures: 3,
+        pollIntervalMs: 10_000, // long enough that only the onReady fast path fires in this test
       },
     );
 
@@ -80,6 +82,51 @@ describe('waitUntilAgentReadyForPrompt', () => {
     registry.fire('agent-1');
 
     await vi.advanceTimersByTimeAsync(500);
+    await expect(promise).resolves.toBeUndefined();
+    vi.useRealTimers();
+  });
+
+  it('resolves via polling even when the agent never fires onReady again (regression)', async () => {
+    // Regression test for the live incident: a "Jira Implementer" CLI
+    // finished booting to its idle prompt, but by the time
+    // waitUntilAgentReadyForPrompt started watching it, the CLI had already
+    // stopped producing any further PTY output -- there was nothing left to
+    // emit. The fast path (onReady, which only fires on NEW PTY data) then
+    // never fires again, and the wait hung forever: promptAgent's /myl3
+    // prompt was never sent, the process sat idle at 0% CPU indefinitely.
+    // PromptInput.tsx's real autofire has exactly this fallback (its
+    // "SLOW PATH: quiescence fallback" comment) for the same reason.
+    vi.useFakeTimers();
+    const registry = makeReadyRegistry();
+    // Tail already shows the startup banner blocker on the FIRST read, then
+    // (as if the CLI finished booting between reads, with no PTY event to
+    // notify us) shows the ready prompt on every subsequent read. onReady is
+    // registered but deliberately never fired -- there is no more output.
+    let callCount = 0;
+    const getTail = () => {
+      callCount++;
+      return callCount === 1 ? 'Booting MCP server: parallel-code\n❯ ' : '❯ ';
+    };
+
+    const promise = waitUntilAgentReadyForPrompt(
+      'agent-1',
+      getTail,
+      registry.registerOnReady,
+      fakeSleep(),
+      {
+        stabilityChecks: 1,
+        recheckDelayMs: 500,
+        maxStabilityFailures: 3,
+        pollIntervalMs: 500,
+      },
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registry.pending('agent-1')).toBe(true); // onReady registered...
+
+    // ...but never fired. Only a polling fallback can rescue this.
+    await vi.advanceTimersByTimeAsync(5_000);
     await expect(promise).resolves.toBeUndefined();
     vi.useRealTimers();
   });
@@ -112,7 +159,7 @@ describe('waitUntilAgentReadyForPrompt', () => {
       getTail,
       registry.registerOnReady,
       (ms) => new Promise((r) => setTimeout(r, ms)),
-      { stabilityChecks: 2, recheckDelayMs: 5, maxStabilityFailures: 10 },
+      { stabilityChecks: 2, recheckDelayMs: 5, maxStabilityFailures: 10, pollIntervalMs: 10_000 },
     ).then(() => {
       resolved = true;
     });
@@ -138,7 +185,7 @@ describe('waitUntilAgentReadyForPrompt', () => {
       getTail,
       registry.registerOnReady,
       (ms) => new Promise((r) => setTimeout(r, ms)),
-      { stabilityChecks: 2, recheckDelayMs: 5, maxStabilityFailures: 2 },
+      { stabilityChecks: 2, recheckDelayMs: 5, maxStabilityFailures: 2, pollIntervalMs: 10_000 },
     );
 
     // Resolving at all (rather than hanging forever on perpetually-unstable
