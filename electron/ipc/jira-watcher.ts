@@ -412,7 +412,22 @@ async function refillImplementerIfIdle(projectId: string): Promise<void> {
       'refillImplementerIfIdle: calling promptAgent',
       { projectId, ticketKey, implementTaskId: queue.implementTaskId },
     );
-    await jiraBridge.promptAgent(queue.implementTaskId, queue.implementAgentId, promptText);
+    try {
+      await jiraBridge.promptAgent(queue.implementTaskId, queue.implementAgentId, promptText);
+    } catch (err) {
+      // The cached implementTaskId/implementAgentId may point at a task the
+      // user deleted from the UI (e.g. its worktree got closed) -- nothing
+      // in this file is told when that happens, so the cache would
+      // otherwise keep retrying the same dead task forever, every poll
+      // tick, with no path to recovery short of an app restart. Clear it so
+      // the NEXT refill re-ensures a fresh task, and put the ticket back in
+      // the queue -- it was never actually delivered (swapTicketLabel only
+      // runs after promptAgent succeeds, below), so it must not be lost.
+      queue.implementTaskId = null;
+      queue.implementAgentId = null;
+      queue.implementQueue.unshift(ticketKey);
+      throw err;
+    }
     console.warn(
       '[jira-watcher][debug]',
       new Date().toISOString(),
@@ -498,7 +513,19 @@ async function refillDeployerIfIdle(projectId: string): Promise<void> {
       'refillDeployerIfIdle: calling promptAgent',
       { projectId, deployTaskId: queue.deployTaskId },
     );
-    await jiraBridge.promptAgent(queue.deployTaskId, queue.deployAgentId, '/pipeline-deploy');
+    try {
+      await jiraBridge.promptAgent(queue.deployTaskId, queue.deployAgentId, '/pipeline-deploy');
+    } catch (err) {
+      // Same reasoning as refillImplementerIfIdle's catch: the cached
+      // deployTaskId/deployAgentId may point at a task the user deleted
+      // from the UI, and nothing here is told when that happens. Clear it
+      // so the NEXT refill (this poll tick's already-scheduled retry, or
+      // the next one) re-ensures a fresh task instead of retrying the same
+      // dead one forever.
+      queue.deployTaskId = null;
+      queue.deployAgentId = null;
+      throw err;
+    }
     console.warn(
       '[jira-watcher][debug]',
       new Date().toISOString(),

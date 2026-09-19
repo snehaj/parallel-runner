@@ -81,6 +81,26 @@ function replyToLatest(
   });
 }
 
+/** Simulates the renderer replying ok:false to the latest request on
+ *  `channel` -- e.g. handlePromptAgent rejecting because the cached
+ *  taskId/agentId no longer refers to a real task (deleted from the UI). */
+function rejectLatest(
+  sent: Array<{ channel: string; payload: unknown }>,
+  channel: string,
+  error: string,
+): void {
+  const req = sent.filter((s) => s.channel === channel).pop();
+  if (!req) throw new Error(`no request sent on ${channel}`);
+  const replyHandler = (
+    ipcMain as unknown as { __handlers: Map<string, (e: unknown, a: unknown) => unknown> }
+  ).__handlers.get(IPC.JiraWatcher_RendererReply);
+  replyHandler?.(null, {
+    reqId: (req.payload as { reqId: string }).reqId,
+    ok: false,
+    error,
+  });
+}
+
 describe('hasTicketKey', () => {
   it('finds an exact ticket key inside a task name', () => {
     expect(hasTicketKey(['DEV_IRREG-1234: Fix the thing'], 'DEV_IRREG-1234')).toBe(true);
@@ -867,6 +887,127 @@ describe('Deployer refill', () => {
 
     const promptReq = sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest).pop();
     expect(promptReq?.payload).toMatchObject({ text: '/pipeline-deploy' });
+    stopWatchingProject('proj-1');
+  });
+
+  it('re-ensures the Deployer task when promptAgent reports the cached task no longer exists -- regression test for closing the "Jira Deployer" task from the UI permanently stalling the queue', async () => {
+    // The user deletes the "Jira Deployer" task from the UI (e.g. its
+    // deleteBranchOnClose worktree cleanup). jira-watcher.ts's own
+    // ProjectQueue.deployTaskId/deployAgentId cache has no invalidation path
+    // for that -- nothing here is told the task is gone. The next refill
+    // must notice promptAgent's failure means "that task is dead" and clear
+    // the cache so ensureDeployerTask runs again, rather than retrying the
+    // same dead taskId forever.
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureDeployerTaskRequest, {
+      taskId: 'deploy-task-1',
+      agentId: 'deploy-agent-1',
+    });
+    await flushPromises();
+    expect(getProjectQueueStateForTests('proj-1')?.deployTaskId).toBe('deploy-task-1');
+
+    // The cached task is now dead: promptAgent's IPC round-trip comes back
+    // ok:false, the same shape handlePromptAgent produces for a taskId that
+    // fails isKnownTask (or any other "this task is gone" failure).
+    rejectLatest(sent, IPC.JiraWatcher_PromptAgentRequest, 'Task not found');
+    await flushPromises();
+
+    expect(getProjectQueueStateForTests('proj-1')?.deployTaskId).toBeNull();
+
+    // The NEXT poll tick must re-ensure a fresh Deployer task rather than
+    // silently doing nothing forever.
+    sent.length = 0;
+    await __runJiraTickForTests();
+    await flushPromises();
+
+    const ensureReq = sent
+      .filter((s) => s.channel === IPC.JiraWatcher_EnsureDeployerTaskRequest)
+      .pop();
+    expect(ensureReq).toBeDefined();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureDeployerTaskRequest, {
+      taskId: 'deploy-task-2',
+      agentId: 'deploy-agent-2',
+    });
+    await flushPromises();
+
+    const promptReq = sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest).pop();
+    expect(promptReq?.payload).toMatchObject({
+      taskId: 'deploy-task-2',
+      agentId: 'deploy-agent-2',
+      text: '/pipeline-deploy',
+    });
+
+    stopWatchingProject('proj-1');
+  });
+});
+
+describe('Implementer refill — stale task cache', () => {
+  beforeEach(() => {
+    __resetJiraWatcherForTests();
+    vi.mocked(queryLabeledTickets).mockReset();
+  });
+
+  it('re-ensures the Implementer task and re-queues the ticket when promptAgent reports the cached task no longer exists', async () => {
+    // Same failure mode as the Deployer regression above, but for the
+    // Implementer -- which also has a not-yet-attempted ticket to protect:
+    // it must go back into implementQueue, not be silently dropped, since
+    // its trigger label was never swapped (swapTicketLabel only runs after
+    // promptAgent succeeds).
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const win = fakeWindow(sent);
+    initJiraWatcher(win);
+    vi.mocked(queryLabeledTickets).mockResolvedValueOnce([
+      { key: 'DEV_IRREG-1234', summary: 'Fix the thing' },
+    ]);
+    startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_ListTaskNamesRequest, { names: [] });
+    await flushPromises();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-1',
+      agentId: 'impl-agent-1',
+    });
+    await flushPromises();
+    expect(getProjectQueueStateForTests('proj-1')?.implementTaskId).toBe('impl-task-1');
+
+    rejectLatest(sent, IPC.JiraWatcher_PromptAgentRequest, 'Task not found');
+    await flushPromises();
+
+    expect(getProjectQueueStateForTests('proj-1')?.implementTaskId).toBeNull();
+    // The ticket goes back into the queue rather than being lost -- it was
+    // never actually delivered, and its trigger label was never swapped.
+    expect(getProjectQueueStateForTests('proj-1')?.implementQueue).toEqual(['DEV_IRREG-1234']);
+
+    // Nothing NEW discovered this tick -- DEV_IRREG-1234 is already sitting in
+    // implementQueue from the requeue above, so this tick's refill acts on
+    // it directly; ListTaskNamesRequest is only consulted for newly
+    // discovered tickets, not requeued ones.
+    vi.mocked(queryLabeledTickets).mockResolvedValueOnce([]);
+    sent.length = 0;
+    void __runJiraTickForTests();
+    await flushPromises();
+
+    const ensureReq = sent
+      .filter((s) => s.channel === IPC.JiraWatcher_EnsureImplementerTaskRequest)
+      .pop();
+    expect(ensureReq).toBeDefined();
+    replyToLatest(sent, IPC.JiraWatcher_EnsureImplementerTaskRequest, {
+      taskId: 'impl-task-2',
+      agentId: 'impl-agent-2',
+    });
+    await flushPromises();
+
+    const promptReq = sent.filter((s) => s.channel === IPC.JiraWatcher_PromptAgentRequest).pop();
+    expect(promptReq?.payload).toMatchObject({
+      taskId: 'impl-task-2',
+      agentId: 'impl-agent-2',
+      text: '/myl3 DEV_IRREG-1234',
+    });
+
     stopWatchingProject('proj-1');
   });
 });
