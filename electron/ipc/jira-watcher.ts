@@ -221,10 +221,23 @@ export function startWatchingProject(project: {
   jiraCompletedLabel?: string;
   jiraDefaultReviewers?: string;
 }): void {
+  // A blank/missing key used to be silently coerced to '', producing
+  // malformed JQL ("project =  AND labels = ...") that Jira either rejects
+  // or returns zero results for -- forever, with no visible error: the
+  // project *looks* watched (queue entry created, no thrown error surfaced
+  // anywhere) while the Implementer queue never receives a single ticket.
+  // Reject up front instead so the caller (the IPC handler) can surface a
+  // real error to the user.
+  if (!project.jiraProjectKey?.trim()) {
+    throw new Error(
+      `Cannot watch project ${project.id}: no Jira project key configured. ` +
+        'Set one in the project settings before enabling the Jira board watcher.',
+    );
+  }
   if (jiraDisabled) return;
   watched.set(project.id, {
     id: project.id,
-    jiraProjectKey: project.jiraProjectKey ?? '',
+    jiraProjectKey: project.jiraProjectKey,
     triggerLabel: project.jiraTriggerLabel ?? DEFAULT_TRIGGER_LABEL,
     completedLabel: project.jiraCompletedLabel ?? DEFAULT_COMPLETED_LABEL,
     defaultReviewers: project.jiraDefaultReviewers ?? '',

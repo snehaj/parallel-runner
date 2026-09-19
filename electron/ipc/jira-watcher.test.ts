@@ -653,6 +653,57 @@ describe('triggerJiraCheckNow', () => {
   });
 });
 
+describe('startWatchingProject — missing jiraProjectKey', () => {
+  beforeEach(() => {
+    __resetJiraWatcherForTests();
+    vi.mocked(queryLabeledTickets).mockReset();
+  });
+
+  // Regression test: startWatchingProject used to silently coerce a missing
+  // jiraProjectKey to '', producing malformed JQL ("project =  AND labels =
+  // ...") that Jira either rejects or returns zero results for -- forever.
+  // The project record simply predating the jiraProjectKey setting (as
+  // happened for equitystory-ers after this field was added) meant watching
+  // looked like it succeeded (Deployer window opens, no error shown) while
+  // the Implementer queue silently never received any ticket.
+  it('throws instead of watching with an empty project key', () => {
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+
+    expect(() => startWatchingProject({ id: 'proj-1', jiraProjectKey: undefined })).toThrow(
+      /jira project key/i,
+    );
+    expect(() => startWatchingProject({ id: 'proj-1', jiraProjectKey: '' })).toThrow(
+      /jira project key/i,
+    );
+    expect(() => startWatchingProject({ id: 'proj-1', jiraProjectKey: '   ' })).toThrow(
+      /jira project key/i,
+    );
+  });
+
+  it('never queries Jira or creates a queue entry for a project with no key', () => {
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+
+    expect(() => startWatchingProject({ id: 'proj-1', jiraProjectKey: undefined })).toThrow();
+
+    expect(queryLabeledTickets).not.toHaveBeenCalled();
+    expect(getProjectQueueStateForTests('proj-1')).toBeUndefined();
+  });
+
+  it('still watches normally once a real project key is provided', async () => {
+    vi.mocked(queryLabeledTickets).mockResolvedValue([]);
+    const win = fakeWindow([]);
+    initJiraWatcher(win);
+
+    expect(() => startWatchingProject({ id: 'proj-1', jiraProjectKey: 'DEV_IRREG' })).not.toThrow();
+    await flushPromises();
+
+    expect(queryLabeledTickets).toHaveBeenCalledWith('DEV_IRREG', 'REG_AUTOMATED');
+    stopWatchingProject('proj-1');
+  });
+});
+
 describe('ProjectQueue lifecycle', () => {
   beforeEach(() => {
     __resetJiraWatcherForTests();
