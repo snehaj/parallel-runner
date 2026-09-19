@@ -33,6 +33,24 @@ export interface AgentSendReadinessOptions {
  * silently dropped, while waitForAgentReady's own prompt-detection then
  * fires on that same boot-complete prompt and is mistaken for "done".
  */
+/** DEBUG: log each readiness state transition with the given agentId and a
+ *  timestamp. Added while investigating a report that the Jira Deployer's
+ *  prompt appeared to only get through after the Jira Implementer window
+ *  was closed -- these logs, read alongside jira-watcher.ts's
+ *  refillImplementerIfIdle/refillDeployerIfIdle [debug] logs, are meant to
+ *  show which of the two phases (waiting for the marker vs. waiting for
+ *  stable output) an agent is stuck in, and when/whether it actually
+ *  advances. Remove once resolved. */
+function debugLog(agentId: string, message: string, extra?: Record<string, unknown>): void {
+  console.warn(
+    '[agent-send-readiness][debug]',
+    new Date().toISOString(),
+    agentId,
+    message,
+    extra ?? {},
+  );
+}
+
 export async function waitUntilAgentReadyForPrompt(
   agentId: string,
   getTail: (agentId: string) => string,
@@ -40,8 +58,11 @@ export async function waitUntilAgentReadyForPrompt(
   sleep: (ms: number) => Promise<void>,
   opts: AgentSendReadinessOptions,
 ): Promise<void> {
+  debugLog(agentId, 'start');
   await waitForPromptMarker(agentId, getTail, registerOnReady, sleep, opts.pollIntervalMs);
+  debugLog(agentId, 'prompt marker found -- entering stability phase');
   await waitForStableOutput(agentId, getTail, sleep, opts);
+  debugLog(agentId, 'ready -- resolving');
 }
 
 function waitForPromptMarker(
@@ -64,12 +85,21 @@ function waitForPromptMarker(
       if (settled) return;
       const tail = getTail(agentId);
       const stripped = stripAnsi(tail);
-      if (isStartupBlockingAutoSend(tail) || !chunkContainsAgentPrompt(stripped)) {
+      const blocked = isStartupBlockingAutoSend(tail);
+      const hasPrompt = chunkContainsAgentPrompt(stripped);
+      if (blocked || !hasPrompt) {
+        debugLog(agentId, 'check (onReady path): not ready, registering onReady', {
+          blocked,
+          hasPrompt,
+          tailLength: tail.length,
+        });
         registerOnReady(agentId, () => {
+          debugLog(agentId, 'onReady callback fired -- new PTY output arrived');
           void sleep(0).then(check);
         });
         return;
       }
+      debugLog(agentId, 'check (onReady path): ready');
       settle();
     }
 
@@ -85,7 +115,11 @@ function waitForPromptMarker(
         if (settled) return;
         const tail = getTail(agentId);
         const stripped = stripAnsi(tail);
-        if (!isStartupBlockingAutoSend(tail) && chunkContainsAgentPrompt(stripped)) {
+        const blocked = isStartupBlockingAutoSend(tail);
+        const hasPrompt = chunkContainsAgentPrompt(stripped);
+        debugLog(agentId, 'poll fallback tick', { blocked, hasPrompt, tailLength: tail.length });
+        if (!blocked && hasPrompt) {
+          debugLog(agentId, 'poll fallback: ready');
           settle();
           return;
         }
@@ -117,6 +151,13 @@ async function waitForStableOutput(
     const normalized = normalizeForComparison(tail);
     const hasPrompt = chunkContainsAgentPrompt(stripped);
     const isStable = normalized === snapshot;
+
+    debugLog(agentId, 'stability check', {
+      hasPrompt,
+      isStable,
+      stabilityCheckFailures,
+      checksRemaining,
+    });
 
     if (!hasPrompt || (!isStable && stabilityCheckFailures < opts.maxStabilityFailures)) {
       if (hasPrompt && !isStable) stabilityCheckFailures++;

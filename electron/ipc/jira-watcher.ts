@@ -376,6 +376,21 @@ async function refillImplementerIfIdle(projectId: string): Promise<void> {
   if (queue.implementQueue.length === 0) return;
   if (implementerBusy.has(projectId)) return;
   implementerBusy.add(projectId);
+  // DEBUG: timing/correlation instrumentation added while investigating a
+  // report that closing the Jira Implementer window appeared to "activate"
+  // a stalled Jira Deployer prompt. Neither task has any shared lock or
+  // concurrency limit in this file, so if that correlation is real, these
+  // timestamps -- cross-referenced against the same log lines from
+  // refillDeployerIfIdle and against OS-level resource pressure (CPU/FDs) at
+  // the same moment -- are the first place to look. Remove once resolved.
+  console.warn(
+    '[jira-watcher][debug]',
+    new Date().toISOString(),
+    'refillImplementerIfIdle: start',
+    {
+      projectId,
+    },
+  );
 
   try {
     if (!queue.implementTaskId || !queue.implementAgentId) {
@@ -391,7 +406,19 @@ async function refillImplementerIfIdle(projectId: string): Promise<void> {
     const reviewers = watchedEntry?.defaultReviewers ?? '';
     const promptText = reviewers ? `/myl3 ${ticketKey} ${reviewers}` : `/myl3 ${ticketKey}`;
 
+    console.warn(
+      '[jira-watcher][debug]',
+      new Date().toISOString(),
+      'refillImplementerIfIdle: calling promptAgent',
+      { projectId, ticketKey, implementTaskId: queue.implementTaskId },
+    );
     await jiraBridge.promptAgent(queue.implementTaskId, queue.implementAgentId, promptText);
+    console.warn(
+      '[jira-watcher][debug]',
+      new Date().toISOString(),
+      'refillImplementerIfIdle: promptAgent resolved',
+      { projectId, ticketKey },
+    );
 
     // Swap the trigger label for the completed label only now that
     // promptAgent has confirmed the ticket was actually handed to the
@@ -412,9 +439,21 @@ async function refillImplementerIfIdle(projectId: string): Promise<void> {
     // awaited inline here -- waitForAgentReady can stay pending for the
     // ticket's entire run, and refillImplementerIfIdle must return promptly
     // so the poll tick that called it isn't blocked for that whole duration.
+    console.warn(
+      '[jira-watcher][debug]',
+      new Date().toISOString(),
+      'refillImplementerIfIdle: awaiting waitForAgentReady (not blocking)',
+      { projectId, ticketKey },
+    );
     void jiraBridge
       .waitForAgentReady(queue.implementAgentId)
       .then(() => {
+        console.warn(
+          '[jira-watcher][debug]',
+          new Date().toISOString(),
+          'refillImplementerIfIdle: waitForAgentReady resolved -- ticket turn ended',
+          { projectId, ticketKey },
+        );
         implementerBusy.delete(projectId);
         queue.implementCurrentTicket = null;
         return refillImplementerIfIdle(projectId);
@@ -441,6 +480,10 @@ async function refillDeployerIfIdle(projectId: string): Promise<void> {
   if (!queue || !jiraBridge) return;
   if (deployerBusy.has(projectId)) return;
   deployerBusy.add(projectId);
+  // DEBUG: see the matching comment on refillImplementerIfIdle's start log.
+  console.warn('[jira-watcher][debug]', new Date().toISOString(), 'refillDeployerIfIdle: start', {
+    projectId,
+  });
 
   try {
     if (!queue.deployTaskId || !queue.deployAgentId) {
@@ -449,7 +492,19 @@ async function refillDeployerIfIdle(projectId: string): Promise<void> {
       queue.deployAgentId = created.agentId;
     }
 
+    console.warn(
+      '[jira-watcher][debug]',
+      new Date().toISOString(),
+      'refillDeployerIfIdle: calling promptAgent',
+      { projectId, deployTaskId: queue.deployTaskId },
+    );
     await jiraBridge.promptAgent(queue.deployTaskId, queue.deployAgentId, '/pipeline-deploy');
+    console.warn(
+      '[jira-watcher][debug]',
+      new Date().toISOString(),
+      'refillDeployerIfIdle: promptAgent resolved',
+      { projectId },
+    );
 
     // Same "don't await inline" reasoning as refillImplementerIfIdle: a
     // deploy pass can run long, and this function must return promptly so
@@ -457,6 +512,12 @@ async function refillDeployerIfIdle(projectId: string): Promise<void> {
     void jiraBridge
       .waitForAgentReady(queue.deployAgentId)
       .then(() => {
+        console.warn(
+          '[jira-watcher][debug]',
+          new Date().toISOString(),
+          'refillDeployerIfIdle: waitForAgentReady resolved',
+          { projectId },
+        );
         deployerBusy.delete(projectId);
         // No unconditional re-arm here -- unlike the Implementer (which has
         // an explicit queue to drain), the Deployer's next prompt is sent by
