@@ -6,10 +6,25 @@
 
 import { store } from './core';
 import { createTask, sendPrompt, updateTaskNotes } from './tasks';
-import { onAgentReady } from './taskStatus';
+import { onAgentReady, getAgentOutputTail } from './taskStatus';
+import { waitUntilAgentReadyForPrompt } from './agent-send-readiness';
 import { invoke } from '../lib/ipc';
 import { IPC } from '../../electron/ipc/channels';
 import type { GitIgnoredEntry } from '../ipc/types';
+
+/** Same stability-check tuning PromptInput.tsx's autofire path uses for
+ *  manually-created tasks (PROMPT_STABILITY_CHECKS / PROMPT_RECHECK_DELAY_MS /
+ *  STABILITY_MAX_FAILURES) -- kept in sync deliberately rather than imported,
+ *  since PromptInput.tsx's constants are private to its own auto-send effect. */
+const AGENT_READY_WAIT_OPTS = {
+  stabilityChecks: 2,
+  recheckDelayMs: 1_500,
+  maxStabilityFailures: 3,
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 interface RendererRequest {
   reqId: string;
@@ -232,6 +247,20 @@ function handleEnsureDeployerTask(req: EnsureTaskRequest): Promise<void> {
 
 async function handlePromptAgent(req: PromptAgentRequest): Promise<void> {
   try {
+    // Wait for the CLI to actually be ready for input before writing anything.
+    // Without this, promptAgent can write into a freshly-spawned terminal
+    // while Claude Code is still printing its startup banner: the keystrokes
+    // land on the banner and are silently dropped, and the ticket never
+    // actually starts even though the task window opens. This mirrors the
+    // readiness gate PromptInput.tsx's autofire already applies to
+    // manually-created tasks.
+    await waitUntilAgentReadyForPrompt(
+      req.agentId,
+      getAgentOutputTail,
+      onAgentReady,
+      sleep,
+      AGENT_READY_WAIT_OPTS,
+    );
     await sendPrompt(req.taskId, req.agentId, req.text);
     reply(req.reqId, true, undefined, undefined, IPC.JiraWatcher_RendererReply);
   } catch (err) {
@@ -300,7 +329,8 @@ export function startRemoteTaskHandlers(): () => void {
   const offEnsureDeployer = window.electron.ipcRenderer.on(
     IPC.JiraWatcher_EnsureDeployerTaskRequest,
     (data: unknown) => {
-      if (data && typeof data === 'object') void handleEnsureDeployerTask(data as EnsureTaskRequest);
+      if (data && typeof data === 'object')
+        void handleEnsureDeployerTask(data as EnsureTaskRequest);
     },
   );
   const offPromptAgent = window.electron.ipcRenderer.on(
@@ -312,7 +342,8 @@ export function startRemoteTaskHandlers(): () => void {
   const offWaitForAgentReady = window.electron.ipcRenderer.on(
     IPC.JiraWatcher_WaitForAgentReadyRequest,
     (data: unknown) => {
-      if (data && typeof data === 'object') handleWaitForAgentReady(data as WaitForAgentReadyRequest);
+      if (data && typeof data === 'object')
+        handleWaitForAgentReady(data as WaitForAgentReadyRequest);
     },
   );
   return () => {
