@@ -295,6 +295,7 @@ describe('Jira watcher persistent-task bridge handlers', () => {
       },
     ]);
     setStore('tasks', {});
+    setStore('taskOrder', []);
     startRemoteTaskHandlers();
   });
 
@@ -379,6 +380,79 @@ describe('Jira watcher persistent-task bridge handlers', () => {
     });
 
     expect(mockCreateTask).toHaveBeenCalledTimes(2);
+  });
+
+  it('EnsureDeployerTask reuses an existing "Jira Deployer" task instead of creating a duplicate', async () => {
+    // Regression test: the main process's queue.deployTaskId/implementTaskId
+    // cache (electron/ipc/jira-watcher.ts) is the ONLY thing that previously
+    // prevented a duplicate task -- and it resets to empty on every app/dev-
+    // server restart, while the renderer's task list (and this exact task)
+    // survives. Restarting the app therefore always minted a second "Jira
+    // Deployer"/"Jira Implementer" window. ensurePersistentTask must check
+    // the renderer's own task list for a same-name, same-project task before
+    // ever calling createTask.
+    setStore('taskOrder', ['existing-deploy-task']);
+    setStore('tasks', 'existing-deploy-task', {
+      id: 'existing-deploy-task',
+      name: 'Jira Deployer',
+      projectId: 'proj-1',
+      agentIds: ['existing-deploy-agent'],
+    } as never);
+
+    listenerFor(IPC.JiraWatcher_EnsureDeployerTaskRequest)?.({
+      reqId: 'r-reuse',
+      projectId: 'proj-1',
+    });
+
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        IPC.JiraWatcher_RendererReply,
+        expect.objectContaining({
+          reqId: 'r-reuse',
+          ok: true,
+          data: { taskId: 'existing-deploy-task', agentId: 'existing-deploy-agent' },
+        }),
+      );
+    });
+    expect(mockCreateTask).not.toHaveBeenCalled();
+  });
+
+  it('EnsureImplementerTask does not reuse a same-named task from a DIFFERENT project', async () => {
+    mockInvoke.mockImplementation((channel: string) => {
+      if (channel === IPC.GetMainBranch) return Promise.resolve('main');
+      if (channel === IPC.GetGitignoredDirs) return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    mockCreateTask.mockResolvedValue('new-task-for-proj-1');
+    setStore('taskOrder', ['other-project-implementer']);
+    setStore('tasks', 'other-project-implementer', {
+      id: 'other-project-implementer',
+      name: 'Jira Implementer',
+      projectId: 'proj-OTHER',
+      agentIds: ['other-agent'],
+    } as never);
+    setStore('tasks', 'new-task-for-proj-1', {
+      id: 'new-task-for-proj-1',
+      agentIds: ['new-agent-for-proj-1'],
+      projectId: 'proj-1',
+    } as never);
+
+    listenerFor(IPC.JiraWatcher_EnsureImplementerTaskRequest)?.({
+      reqId: 'r-diff-project',
+      projectId: 'proj-1',
+    });
+
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        IPC.JiraWatcher_RendererReply,
+        expect.objectContaining({
+          reqId: 'r-diff-project',
+          ok: true,
+          data: { taskId: 'new-task-for-proj-1', agentId: 'new-agent-for-proj-1' },
+        }),
+      );
+    });
+    expect(mockCreateTask).toHaveBeenCalledTimes(1);
   });
 
   it('PromptAgent calls sendPrompt with the given taskId/agentId/text and replies ok', async () => {
