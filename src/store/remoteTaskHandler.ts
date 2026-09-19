@@ -315,10 +315,26 @@ async function handlePromptAgent(req: PromptAgentRequest): Promise<void> {
   }
 }
 
-function handleWaitForAgentReady(req: WaitForAgentReadyRequest): void {
-  onAgentReady(req.agentId, () => {
-    reply(req.reqId, true, undefined, undefined, IPC.JiraWatcher_RendererReply);
-  });
+async function handleWaitForAgentReady(req: WaitForAgentReadyRequest): Promise<void> {
+  // Delegate to waitUntilAgentReadyForPrompt rather than a raw onAgentReady
+  // callback -- onAgentReady is one-shot and only fires on NEW PTY output.
+  // jira-watcher.ts calls this after a ticket finishes to detect "safe to
+  // send the next one"; if the agent settles at its idle prompt and
+  // produces no FURTHER output after that point, a raw onAgentReady
+  // callback never fires again and the Implementer/Deployer would sit idle
+  // forever, never picking up its next ticket -- reproduced live after
+  // myl3 completed a ticket. waitUntilAgentReadyForPrompt already has a
+  // polling fallback for exactly this (added in 420c22e for promptAgent's
+  // own readiness wait, the other caller of this same pattern); reuse it
+  // instead of keeping a second copy that lacks it.
+  await waitUntilAgentReadyForPrompt(
+    req.agentId,
+    getAgentOutputTail,
+    onAgentReady,
+    sleep,
+    AGENT_READY_WAIT_OPTS,
+  );
+  reply(req.reqId, true, undefined, undefined, IPC.JiraWatcher_RendererReply);
 }
 
 /** Subscribe to mobile task-creation requests and the Jira board watcher's own
@@ -384,7 +400,7 @@ export function startRemoteTaskHandlers(): () => void {
     IPC.JiraWatcher_WaitForAgentReadyRequest,
     (data: unknown) => {
       if (data && typeof data === 'object')
-        handleWaitForAgentReady(data as WaitForAgentReadyRequest);
+        void handleWaitForAgentReady(data as WaitForAgentReadyRequest);
     },
   );
   return () => {
