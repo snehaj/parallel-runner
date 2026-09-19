@@ -456,6 +456,8 @@ describe('Jira watcher persistent-task bridge handlers', () => {
   });
 
   it('PromptAgent calls sendPrompt with the given taskId/agentId/text and replies ok', async () => {
+    setStore('taskOrder', ['t1']);
+    setStore('tasks', 't1', { id: 't1', projectId: 'proj-1', agentIds: ['a1'] } as never);
     mockSendPrompt.mockResolvedValue(undefined);
     listenerFor(IPC.JiraWatcher_PromptAgentRequest)?.({
       reqId: 'r3',
@@ -480,6 +482,8 @@ describe('Jira watcher persistent-task bridge handlers', () => {
     // on the startup banner and were silently dropped. promptAgent must wait
     // for readiness (the same gate manually-created tasks already get via
     // PromptInput.tsx's autofire) before ever calling sendPrompt.
+    setStore('taskOrder', ['t1']);
+    setStore('tasks', 't1', { id: 't1', projectId: 'proj-1', agentIds: ['a1'] } as never);
     const callOrder: string[] = [];
     mockWaitUntilAgentReadyForPrompt.mockImplementation(async () => {
       callOrder.push('wait');
@@ -509,6 +513,8 @@ describe('Jira watcher persistent-task bridge handlers', () => {
   });
 
   it('PromptAgent replies with ok:false when sendPrompt rejects', async () => {
+    setStore('taskOrder', ['t1']);
+    setStore('tasks', 't1', { id: 't1', projectId: 'proj-1', agentIds: ['a1'] } as never);
     mockSendPrompt.mockRejectedValue(new Error('agent not found'));
     listenerFor(IPC.JiraWatcher_PromptAgentRequest)?.({
       reqId: 'r4',
@@ -522,6 +528,34 @@ describe('Jira watcher persistent-task bridge handlers', () => {
     expect(mockInvoke).toHaveBeenCalledWith(
       IPC.JiraWatcher_RendererReply,
       expect.objectContaining({ reqId: 'r4', ok: false, error: 'agent not found' }),
+    );
+  });
+
+  it('PromptAgent replies with ok:false immediately, without waiting on readiness, when the taskId no longer exists', async () => {
+    // Regression test: the Jira watcher's own queue.deployTaskId/
+    // implementTaskId cache (electron/ipc/jira-watcher.ts) has no way to
+    // learn a task was deleted from the UI. Before this fix, promptAgent
+    // would call waitUntilAgentReadyForPrompt for a dead agentId with no
+    // real PTY behind it -- readiness could never become true, so the call
+    // hung until the main process's own 120s callRenderer timeout finally
+    // gave up. Rejecting fast here means jira-watcher.ts's catch (which
+    // clears the stale cache) fires in milliseconds, not two minutes.
+    setStore('taskOrder', []);
+    setStore('tasks', {});
+    listenerFor(IPC.JiraWatcher_PromptAgentRequest)?.({
+      reqId: 'r-deleted',
+      taskId: 'deleted-task',
+      agentId: 'deleted-agent',
+      text: '/pipeline-deploy',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockWaitUntilAgentReadyForPrompt).not.toHaveBeenCalled();
+    expect(mockSendPrompt).not.toHaveBeenCalled();
+    expect(mockInvoke).toHaveBeenCalledWith(
+      IPC.JiraWatcher_RendererReply,
+      expect.objectContaining({ reqId: 'r-deleted', ok: false, error: 'Task not found' }),
     );
   });
 

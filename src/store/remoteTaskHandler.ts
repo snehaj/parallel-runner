@@ -277,6 +277,17 @@ function handleEnsureDeployerTask(req: EnsureTaskRequest): Promise<void> {
 
 async function handlePromptAgent(req: PromptAgentRequest): Promise<void> {
   try {
+    // Reject fast if this task was deleted from the UI since the Jira
+    // watcher's main-process cache (jira-watcher.ts's ProjectQueue) last
+    // saw it -- that cache has no way to learn a task is gone. Without this
+    // check, waitUntilAgentReadyForPrompt below would wait on a dead
+    // agentId with no real PTY behind it: readiness can never become true,
+    // so the call would hang until the main process's own 120s
+    // callRenderer timeout finally gave up, instead of failing in
+    // milliseconds so the caller's stale-cache cleanup runs promptly.
+    if (!isKnownTask(store.tasks, req.taskId)) {
+      throw new Error('Task not found');
+    }
     // Wait for the CLI to actually be ready for input before writing anything.
     // Without this, promptAgent can write into a freshly-spawned terminal
     // while Claude Code is still printing its startup banner: the keystrokes
