@@ -75,24 +75,14 @@ export interface Project {
   coverageReportPath?: string;
   terminalBookmarks?: TerminalBookmark[];
   isGitRepo?: boolean; // undefined treated as true for backward compat
-  /** Enables the per-project Jira board watcher (polls for labeled tickets
-   *  and spawns a task for each). Default false/unset — opt-in per project. */
-  jiraWatchEnabled?: boolean;
-  /** Jira label that marks a ticket for automatic pickup. Default
-   *  'REG_AUTOMATED' if unset — see jira-watcher.ts's DEFAULT_TRIGGER_LABEL. */
-  jiraTriggerLabel?: string;
-  /** Jira label applied (replacing jiraTriggerLabel) once a task has been
-   *  spawned for a ticket. Default 'REG_AUTOMATED_SUCC' if unset — see
-   *  jira-watcher.ts's DEFAULT_COMPLETED_LABEL. */
-  jiraCompletedLabel?: string;
-  /** Jira project key (e.g. 'DEV_IRREG') this project's watcher queries.
-   *  Required for the watcher to do anything useful — unset means the
-   *  watcher has nothing to query and effectively does nothing even if
-   *  jiraWatchEnabled is true. */
+  /** Jira project key (e.g. 'DEV_IRREG') used to fill in the Implementer/Deployer
+   *  loop-task prompt templates in EditProjectDialog. Required for either
+   *  "Start Jira Implementer"/"Start Jira Deployer" button to produce a working
+   *  prompt — unset means the button is disabled. */
   jiraProjectKey?: string;
-  /** Default reviewers string (e.g. '@avnair @spummer') passed verbatim as
-   *  myl3's `reviewers` argument for every ticket the Implementer queue
-   *  auto-picks up. Unset means myl3 runs without named reviewers. */
+  /** Default reviewers string (e.g. '@avnair @spummer') baked into the
+   *  Implementer loop-task's prompt as myl3's `reviewers` argument for every
+   *  ticket it picks up. Unset means myl3 runs without named reviewers. */
   jiraDefaultReviewers?: string;
 }
 

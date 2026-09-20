@@ -1,4 +1,4 @@
-import { batch, createSignal } from 'solid-js';
+import { batch } from 'solid-js';
 import { produce } from 'solid-js/store';
 import { store, setStore } from './core';
 import { setActiveTask } from './navigation';
@@ -244,45 +244,6 @@ export function setAskCodeProvider(provider: 'claude' | 'minimax'): void {
 export function setMinimaxApiKey(key: string): void {
   invoke(IPC.SetMinimaxApiKey, { key: key.trim() }).catch((e) =>
     console.warn('Failed to set MiniMax API key:', e),
-  );
-}
-
-// Local buffers so either Jira field's onInput can send both values together
-// -- the main process always expects {email, token} as a pair (there's no
-// separate "set just the email" IPC call). Memory-only, same as the values
-// they forward to jira-client.ts's own memory-only storage.
-// Email is a signal (not a plain variable) so SettingsDialog can read it back:
-// the dialog unmounts its contents on close (<Show when={props.open}>), so
-// without a value surviving outside the component tree, the field re-renders
-// empty on every reopen even though the credential is still set in the main
-// process. The token itself stays write-only (never read back, matching the
-// password field's UI) -- only a boolean "is one set" signal survives, so the
-// dialog can show a non-secret confirmation without ever exposing the value.
-const [jiraEmailSignal, setJiraEmailSignal] = createSignal('');
-const [jiraTokenSetSignal, setJiraTokenSetSignal] = createSignal(false);
-let jiraTokenBuffer = '';
-
-export function getJiraEmail(): string {
-  return jiraEmailSignal();
-}
-
-export function isJiraTokenSet(): boolean {
-  return jiraTokenSetSignal();
-}
-
-export function setJiraEmail(email: string): void {
-  const trimmed = email.trim();
-  setJiraEmailSignal(trimmed);
-  invoke(IPC.SetJiraCredentials, { email: trimmed, token: jiraTokenBuffer }).catch((e) =>
-    console.warn('Failed to set Jira credentials:', e),
-  );
-}
-
-export function setJiraToken(token: string): void {
-  jiraTokenBuffer = token.trim();
-  setJiraTokenSetSignal(jiraTokenBuffer.length > 0);
-  invoke(IPC.SetJiraCredentials, { email: jiraEmailSignal(), token: jiraTokenBuffer }).catch(
-    (e) => console.warn('Failed to set Jira credentials:', e),
   );
 }
 

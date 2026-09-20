@@ -66,9 +66,6 @@ export function updateProject(
       | 'coverageReportPath'
       | 'terminalBookmarks'
       | 'isGitRepo'
-      | 'jiraWatchEnabled'
-      | 'jiraTriggerLabel'
-      | 'jiraCompletedLabel'
       | 'jiraProjectKey'
       | 'jiraDefaultReviewers'
     >
@@ -93,12 +90,6 @@ export function updateProject(
       if (updates.terminalBookmarks !== undefined)
         s.projects[idx].terminalBookmarks = updates.terminalBookmarks;
       if (updates.isGitRepo !== undefined) s.projects[idx].isGitRepo = updates.isGitRepo;
-      if (updates.jiraWatchEnabled !== undefined)
-        s.projects[idx].jiraWatchEnabled = updates.jiraWatchEnabled;
-      if (Object.prototype.hasOwnProperty.call(updates, 'jiraTriggerLabel'))
-        s.projects[idx].jiraTriggerLabel = updates.jiraTriggerLabel;
-      if (Object.prototype.hasOwnProperty.call(updates, 'jiraCompletedLabel'))
-        s.projects[idx].jiraCompletedLabel = updates.jiraCompletedLabel;
       if (Object.prototype.hasOwnProperty.call(updates, 'jiraProjectKey'))
         s.projects[idx].jiraProjectKey = updates.jiraProjectKey;
       if (Object.prototype.hasOwnProperty.call(updates, 'jiraDefaultReviewers'))
