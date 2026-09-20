@@ -5,28 +5,10 @@
 // main-side bridge.
 
 import { store } from './core';
-import { createTask, sendPrompt, updateTaskNotes } from './tasks';
-import { onAgentReady, getAgentOutputTail } from './taskStatus';
-import { waitUntilAgentReadyForPrompt } from './agent-send-readiness';
+import { createTask, updateTaskNotes } from './tasks';
 import { invoke } from '../lib/ipc';
 import { IPC } from '../../electron/ipc/channels';
 import type { GitIgnoredEntry } from '../ipc/types';
-
-/** Same stability-check tuning PromptInput.tsx's autofire path uses for
- *  manually-created tasks (PROMPT_STABILITY_CHECKS / PROMPT_RECHECK_DELAY_MS /
- *  STABILITY_MAX_FAILURES / QUIESCENCE_POLL_MS) -- kept in sync deliberately
- *  rather than imported, since PromptInput.tsx's constants are private to
- *  its own auto-send effect. */
-const AGENT_READY_WAIT_OPTS = {
-  stabilityChecks: 2,
-  recheckDelayMs: 1_500,
-  maxStabilityFailures: 3,
-  pollIntervalMs: 500,
-};
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 interface RendererRequest {
   reqId: string;
@@ -45,24 +27,6 @@ interface GetNotesRequest extends RendererRequest {
 interface SetNotesRequest extends RendererRequest {
   taskId: string;
   notes: string;
-}
-
-interface ListTaskNamesRequest extends RendererRequest {
-  projectId: string;
-}
-
-interface EnsureTaskRequest extends RendererRequest {
-  projectId: string;
-}
-
-interface PromptAgentRequest extends RendererRequest {
-  taskId: string;
-  agentId: string;
-  text: string;
-}
-
-interface WaitForAgentReadyRequest extends RendererRequest {
-  agentId: string;
 }
 
 function reply(
@@ -84,11 +48,11 @@ function handleGetProjects(req: RendererRequest): void {
   );
 }
 
-/** Shared core for both callers of the create-task round-trip: the mobile
- *  pairing bridge (`Remote_CreateTaskRequest`) and the Jira board watcher
- *  (`JiraWatcher_CreateTaskRequest`). The request shape is identical; only the
- *  reply channel differs, because main registers one `ipcMain.handle` per
- *  reply channel and each bridge owns its own pending-request map. */
+/** Core of the mobile pairing bridge's create-task round-trip
+ *  (`Remote_CreateTaskRequest`). `replyChannel` is a parameter (rather than
+ *  hardcoded) because this used to be shared with the Jira board watcher's
+ *  own create-task request, which replied on a different channel -- now
+ *  removed, leaving `handleCreateTask` as the only caller. */
 async function createTaskForRequest(req: CreateTaskRequest, replyChannel: IPC): Promise<void> {
   try {
     const project = store.projects.find((p) => p.id === req.projectId);
@@ -143,12 +107,6 @@ function handleCreateTask(req: CreateTaskRequest): Promise<void> {
   return createTaskForRequest(req, IPC.Remote_RendererReply);
 }
 
-/** Jira board watcher bridge: replies on `JiraWatcher_RendererReply`, which is
- *  where `initJiraWatcherBridge` awaits its pending create-task requests. */
-function handleJiraCreateTask(req: CreateTaskRequest): Promise<void> {
-  return createTaskForRequest(req, IPC.JiraWatcher_RendererReply);
-}
-
 /**
  * True only when `taskId` is a real, own entry of the tasks record.
  *
@@ -180,165 +138,7 @@ function handleSetNotes(req: SetNotesRequest): void {
   reply(req.reqId, true, { ok: true });
 }
 
-function handleListTaskNames(req: ListTaskNamesRequest): void {
-  const names = store.taskOrder
-    .map((id) => store.tasks[id])
-    .filter((task) => task?.projectId === req.projectId)
-    .map((task) => task.name);
-  reply(req.reqId, true, { names }, undefined, IPC.JiraWatcher_RendererReply);
-}
-
-/** Shared by EnsureImplementerTask/EnsureDeployerTask -- creates one
- *  persistent, un-prompted task (no initialPrompt) for the given project and
- *  replies with {taskId, agentId}. `name` distinguishes the Implementer's
- *  window from the Deployer's in the task list. */
-async function ensurePersistentTask(req: EnsureTaskRequest, name: string): Promise<void> {
-  try {
-    const project = store.projects.find((p) => p.id === req.projectId);
-    if (!project) throw new Error('Project not found');
-
-    // Reuse an existing same-name task for this project if one already
-    // exists in the renderer's own task list. The main process's own
-    // implementTaskId/deployTaskId cache (jira-watcher.ts's ProjectQueue) is
-    // the only other thing that would normally prevent a duplicate, but it
-    // resets to empty on every app/dev-server restart while this task list
-    // survives -- without this check, the very first refill after any
-    // restart always mints a second "Jira Implementer"/"Jira Deployer"
-    // window alongside the still-live original.
-    const existing = store.taskOrder
-      .map((id) => store.tasks[id])
-      .find((task) => task?.projectId === req.projectId && task?.name === name);
-    if (existing) {
-      const existingAgentId = existing.agentIds[0];
-      if (existingAgentId) {
-        reply(
-          req.reqId,
-          true,
-          { taskId: existing.id, agentId: existingAgentId },
-          undefined,
-          IPC.JiraWatcher_RendererReply,
-        );
-        return;
-      }
-      // Falls through to create a fresh task if the existing record somehow
-      // has no agent -- an unexpected but non-fatal state, not worth failing
-      // the whole ensure over.
-    }
-
-    const agentDef =
-      store.availableAgents.find((a) => a.id === store.lastAgentId) ?? store.availableAgents[0];
-    if (!agentDef) throw new Error('No agent configured');
-
-    const isGit = project.isGitRepo !== false;
-    let baseBranch = '';
-    let symlinkDirs: string[] = [];
-    if (isGit) {
-      baseBranch =
-        project.defaultBaseBranch ??
-        (await invoke<string>(IPC.GetMainBranch, { projectRoot: project.path }));
-      const ignoredEntries = await invoke<GitIgnoredEntry[]>(IPC.GetGitignoredDirs, {
-        projectRoot: project.path,
-      });
-      symlinkDirs = ignoredEntries.filter((entry) => entry.isDefault).map((entry) => entry.name);
-    }
-
-    const taskId = await createTask({
-      name,
-      agentDef,
-      projectId: req.projectId,
-      gitIsolation: isGit ? 'worktree' : 'none',
-      baseBranch,
-      symlinkDirs,
-      // No initialPrompt -- this task starts idle. The first ticket is
-      // delivered via a separate PromptAgent request once this one replies.
-    });
-    const agentId = store.tasks[taskId]?.agentIds[0];
-    if (!agentId) throw new Error('Created task has no agent');
-
-    reply(req.reqId, true, { taskId, agentId }, undefined, IPC.JiraWatcher_RendererReply);
-  } catch (err) {
-    reply(
-      req.reqId,
-      false,
-      undefined,
-      err instanceof Error ? err.message : String(err),
-      IPC.JiraWatcher_RendererReply,
-    );
-  }
-}
-
-function handleEnsureImplementerTask(req: EnsureTaskRequest): Promise<void> {
-  return ensurePersistentTask(req, 'Jira Implementer');
-}
-
-function handleEnsureDeployerTask(req: EnsureTaskRequest): Promise<void> {
-  return ensurePersistentTask(req, 'Jira Deployer');
-}
-
-async function handlePromptAgent(req: PromptAgentRequest): Promise<void> {
-  try {
-    // Reject fast if this task was deleted from the UI since the Jira
-    // watcher's main-process cache (jira-watcher.ts's ProjectQueue) last
-    // saw it -- that cache has no way to learn a task is gone. Without this
-    // check, waitUntilAgentReadyForPrompt below would wait on a dead
-    // agentId with no real PTY behind it: readiness can never become true,
-    // so the call would hang until the main process's own 120s
-    // callRenderer timeout finally gave up, instead of failing in
-    // milliseconds so the caller's stale-cache cleanup runs promptly.
-    if (!isKnownTask(store.tasks, req.taskId)) {
-      throw new Error('Task not found');
-    }
-    // Wait for the CLI to actually be ready for input before writing anything.
-    // Without this, promptAgent can write into a freshly-spawned terminal
-    // while Claude Code is still printing its startup banner: the keystrokes
-    // land on the banner and are silently dropped, and the ticket never
-    // actually starts even though the task window opens. This mirrors the
-    // readiness gate PromptInput.tsx's autofire already applies to
-    // manually-created tasks.
-    await waitUntilAgentReadyForPrompt(
-      req.agentId,
-      getAgentOutputTail,
-      onAgentReady,
-      sleep,
-      AGENT_READY_WAIT_OPTS,
-    );
-    await sendPrompt(req.taskId, req.agentId, req.text);
-    reply(req.reqId, true, undefined, undefined, IPC.JiraWatcher_RendererReply);
-  } catch (err) {
-    reply(
-      req.reqId,
-      false,
-      undefined,
-      err instanceof Error ? err.message : String(err),
-      IPC.JiraWatcher_RendererReply,
-    );
-  }
-}
-
-async function handleWaitForAgentReady(req: WaitForAgentReadyRequest): Promise<void> {
-  // Delegate to waitUntilAgentReadyForPrompt rather than a raw onAgentReady
-  // callback -- onAgentReady is one-shot and only fires on NEW PTY output.
-  // jira-watcher.ts calls this after a ticket finishes to detect "safe to
-  // send the next one"; if the agent settles at its idle prompt and
-  // produces no FURTHER output after that point, a raw onAgentReady
-  // callback never fires again and the Implementer/Deployer would sit idle
-  // forever, never picking up its next ticket -- reproduced live after
-  // myl3 completed a ticket. waitUntilAgentReadyForPrompt already has a
-  // polling fallback for exactly this (added in 420c22e for promptAgent's
-  // own readiness wait, the other caller of this same pattern); reuse it
-  // instead of keeping a second copy that lacks it.
-  await waitUntilAgentReadyForPrompt(
-    req.agentId,
-    getAgentOutputTail,
-    onAgentReady,
-    sleep,
-    AGENT_READY_WAIT_OPTS,
-  );
-  reply(req.reqId, true, undefined, undefined, IPC.JiraWatcher_RendererReply);
-}
-
-/** Subscribe to mobile task-creation requests and the Jira board watcher's own
- *  create-task / list-task-names round-trips. Returns an unsubscribe fn. */
+/** Subscribe to mobile task-creation requests. Returns an unsubscribe fn. */
 export function startRemoteTaskHandlers(): () => void {
   const offProjects = window.electron.ipcRenderer.on(
     IPC.Remote_GetProjectsRequest,
@@ -364,55 +164,10 @@ export function startRemoteTaskHandlers(): () => void {
       if (data && typeof data === 'object') handleSetNotes(data as SetNotesRequest);
     },
   );
-  const offListTaskNames = window.electron.ipcRenderer.on(
-    IPC.JiraWatcher_ListTaskNamesRequest,
-    (data: unknown) => {
-      if (data && typeof data === 'object') handleListTaskNames(data as ListTaskNamesRequest);
-    },
-  );
-  const offJiraCreate = window.electron.ipcRenderer.on(
-    IPC.JiraWatcher_CreateTaskRequest,
-    (data: unknown) => {
-      if (data && typeof data === 'object') void handleJiraCreateTask(data as CreateTaskRequest);
-    },
-  );
-  const offEnsureImplementer = window.electron.ipcRenderer.on(
-    IPC.JiraWatcher_EnsureImplementerTaskRequest,
-    (data: unknown) => {
-      if (data && typeof data === 'object')
-        void handleEnsureImplementerTask(data as EnsureTaskRequest);
-    },
-  );
-  const offEnsureDeployer = window.electron.ipcRenderer.on(
-    IPC.JiraWatcher_EnsureDeployerTaskRequest,
-    (data: unknown) => {
-      if (data && typeof data === 'object')
-        void handleEnsureDeployerTask(data as EnsureTaskRequest);
-    },
-  );
-  const offPromptAgent = window.electron.ipcRenderer.on(
-    IPC.JiraWatcher_PromptAgentRequest,
-    (data: unknown) => {
-      if (data && typeof data === 'object') void handlePromptAgent(data as PromptAgentRequest);
-    },
-  );
-  const offWaitForAgentReady = window.electron.ipcRenderer.on(
-    IPC.JiraWatcher_WaitForAgentReadyRequest,
-    (data: unknown) => {
-      if (data && typeof data === 'object')
-        void handleWaitForAgentReady(data as WaitForAgentReadyRequest);
-    },
-  );
   return () => {
     offProjects();
     offCreate();
     offGetNotes();
     offSetNotes();
-    offListTaskNames();
-    offJiraCreate();
-    offEnsureImplementer();
-    offEnsureDeployer();
-    offPromptAgent();
-    offWaitForAgentReady();
   };
 }
