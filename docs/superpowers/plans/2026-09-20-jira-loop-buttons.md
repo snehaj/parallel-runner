@@ -1474,7 +1474,7 @@ EOF
 **Files:** none (verification only).
 
 **Interfaces:**
-- Consumes: the fully-merged result of Tasks 1-5.
+- Consumes: the fully-merged result of Tasks 1-6.
 - Produces: nothing — this task is a checklist, not code.
 
 - [ ] **Step 1: Restart the dev app**
