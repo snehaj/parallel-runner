@@ -99,7 +99,6 @@ const ALLOWED_CHANNELS = new Set([
   'ask_about_code',
   'cancel_ask_about_code',
   'set_minimax_api_key',
-  'set_jira_credentials',
   'check_docker_available',
   'check_docker_image_exists',
   'build_docker_image',
@@ -153,14 +152,10 @@ const ALLOWED_CHANNELS = new Set([
   'jira_watcher_create_task_request',
   'jira_watcher_list_task_names_request',
   'jira_watcher_renderer_reply',
-  'start_jira_watcher',
-  'stop_jira_watcher',
-  'jira_watcher_status',
   'jira_watcher_ensure_implementer_task_request',
   'jira_watcher_ensure_deployer_task_request',
   'jira_watcher_prompt_agent_request',
   'jira_watcher_wait_for_agent_ready_request',
-  'trigger_jira_check_now',
 ]);
 
 function isAllowedChannel(channel) {

@@ -37,13 +37,6 @@ import {
   refreshPrChecksWatcher,
   isPrUrl,
 } from './pr-checks.js';
-import {
-  initJiraWatcher,
-  startWatchingProject,
-  stopWatchingProject,
-  triggerJiraCheckNow,
-} from './jira-watcher.js';
-import { setJiraCredentials } from './jira-client.js';
 import { readCoverageSummary } from './coverage.js';
 import { loadEslintQualityFindings } from './eslint-quality-findings.js';
 import { startRemoteServer, getMCPLogs, type RemoteProject } from '../remote/server.js';
@@ -851,9 +844,6 @@ export function registerAllHandlers(win: BrowserWindow): void {
 
   // --- PR CI status watcher ---
   initPrChecks(win);
-
-  // --- Jira board watcher ---
-  initJiraWatcher(win);
   ipcMain.handle(IPC.StartPrChecksWatcher, (_e, args) => {
     assertString(args.taskId, 'taskId');
     assertString(args.prUrl, 'prUrl');
@@ -891,34 +881,6 @@ export function registerAllHandlers(win: BrowserWindow): void {
   ipcMain.handle(IPC.RefreshPrChecksWatcher, (_e, args) => {
     assertString(args.taskId, 'taskId');
     refreshPrChecksWatcher(args.taskId);
-  });
-
-  // --- Jira board watcher (per-project start/stop) ---
-  ipcMain.handle(IPC.StartJiraWatcher, (_e, args) => {
-    assertString(args.projectId, 'projectId');
-    startWatchingProject({
-      id: args.projectId,
-      jiraProjectKey: typeof args.jiraProjectKey === 'string' ? args.jiraProjectKey : undefined,
-      jiraTriggerLabel:
-        typeof args.jiraTriggerLabel === 'string' ? args.jiraTriggerLabel : undefined,
-      jiraCompletedLabel:
-        typeof args.jiraCompletedLabel === 'string' ? args.jiraCompletedLabel : undefined,
-      jiraDefaultReviewers:
-        typeof args.jiraDefaultReviewers === 'string' ? args.jiraDefaultReviewers : undefined,
-    });
-  });
-  ipcMain.handle(IPC.StopJiraWatcher, (_e, args) => {
-    assertString(args.projectId, 'projectId');
-    stopWatchingProject(args.projectId);
-  });
-  ipcMain.handle(IPC.TriggerJiraCheckNow, (_e, args) => {
-    assertString(args.projectId, 'projectId');
-    return triggerJiraCheckNow(args.projectId);
-  });
-  ipcMain.handle(IPC.SetJiraCredentials, (_e, args) => {
-    assertString(args.email, 'email');
-    assertString(args.token, 'token');
-    setJiraCredentials(args.email, args.token);
   });
 
   // --- Local ESLint quality findings ---
