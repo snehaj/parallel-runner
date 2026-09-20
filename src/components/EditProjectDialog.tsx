@@ -3,7 +3,6 @@ import { Dialog } from './Dialog';
 import { updateProject, PASTEL_HUES, isProjectMissing, relinkProject } from '../store/store';
 import { sanitizeBranchPrefix, toBranchName } from '../lib/branch-name';
 import { theme, sectionLabelStyle } from '../lib/theme';
-import { jiraWatcherStatus, jiraWatcherStatusLabel } from '../store/jira-watcher';
 import type { Project, TerminalBookmark, GitIsolationMode } from '../store/types';
 import { SegmentedButtons } from './SegmentedButtons';
 import { ImportWorktreesDialog } from './ImportWorktreesDialog';
@@ -11,6 +10,14 @@ import { CloseIcon } from './icons';
 import { RemoveProjectConfirm } from './RemoveProjectConfirm';
 import { invoke } from '../lib/ipc';
 import { IPC } from '../../electron/ipc/channels';
+import { createTask } from '../store/tasks';
+import { store } from '../store/core';
+import {
+  IMPLEMENTER_LOOP_PROMPT,
+  DEPLOYER_LOOP_PROMPT,
+  hasTaskNamed,
+} from '../store/jira-loop-prompts';
+import type { GitIgnoredEntry } from '../ipc/types';
 
 interface EditProjectDialogProps {
   project: Project | null;
@@ -30,14 +37,8 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
   const [defaultGitIsolation, setDefaultGitIsolation] = createSignal<GitIsolationMode>('worktree');
   const [defaultBaseBranch, setDefaultBaseBranch] = createSignal('');
   const [coverageReportPath, setCoverageReportPath] = createSignal('');
-  const [jiraWatchEnabled, setJiraWatchEnabled] = createSignal(false);
   const [jiraProjectKey, setJiraProjectKey] = createSignal('');
-  const [jiraTriggerLabel, setJiraTriggerLabel] = createSignal('');
-  const [jiraCompletedLabel, setJiraCompletedLabel] = createSignal('');
   const [jiraDefaultReviewers, setJiraDefaultReviewers] = createSignal('');
-  const [checkingNow, setCheckingNow] = createSignal(false);
-  const [checkNowResult, setCheckNowResult] = createSignal<string | null>(null);
-  const [checkNowError, setCheckNowError] = createSignal<string | null>(null);
   const [bookmarks, setBookmarks] = createSignal<TerminalBookmark[]>([]);
   const [newCommand, setNewCommand] = createSignal('');
   const [showImportDialog, setShowImportDialog] = createSignal(false);
@@ -55,31 +56,101 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
     setDefaultGitIsolation(p.defaultGitIsolation ?? 'worktree');
     setDefaultBaseBranch(p.defaultBaseBranch ?? '');
     setCoverageReportPath(p.coverageReportPath ?? '');
-    setJiraWatchEnabled(p.jiraWatchEnabled ?? false);
     setJiraProjectKey(p.jiraProjectKey ?? '');
-    setJiraTriggerLabel(p.jiraTriggerLabel ?? '');
-    setJiraCompletedLabel(p.jiraCompletedLabel ?? '');
     setJiraDefaultReviewers(p.jiraDefaultReviewers ?? '');
     setBookmarks(p.terminalBookmarks ? [...p.terminalBookmarks] : []);
     setNewCommand('');
     setConfirmRemove(false);
-    setCheckNowResult(null);
-    setCheckNowError(null);
     requestAnimationFrame(() => nameRef?.focus());
   });
 
-  async function handleTriggerNow() {
-    if (!props.project) return;
-    setCheckingNow(true);
-    setCheckNowError(null);
-    setCheckNowResult(null);
+  const [starting, setStarting] = createSignal<'implementer' | 'deployer' | null>(null);
+  const [startError, setStartError] = createSignal<string | null>(null);
+
+  function implementerRunning(): boolean {
+    const p = props.project;
+    if (!p) return false;
+    return hasTaskNamed(store.taskOrder, store.tasks, p.id, 'Jira Implementer');
+  }
+
+  function deployerRunning(): boolean {
+    const p = props.project;
+    if (!p) return false;
+    return hasTaskNamed(store.taskOrder, store.tasks, p.id, 'Jira Deployer');
+  }
+
+  async function startImplementer() {
+    const p = props.project;
+    if (!p || !p.jiraProjectKey?.trim()) return;
+    setStartError(null);
+    setStarting('implementer');
     try {
-      await invoke(IPC.TriggerJiraCheckNow, { projectId: props.project.id });
-      setCheckNowResult('Checked Jira just now.');
+      const agentDef =
+        store.availableAgents.find((a) => a.id === store.lastAgentId) ?? store.availableAgents[0];
+      if (!agentDef) throw new Error('No agent configured');
+      const isGit = p.isGitRepo !== false;
+      let baseBranch = '';
+      let symlinkDirs: string[] = [];
+      if (isGit) {
+        baseBranch =
+          p.defaultBaseBranch ?? (await invoke<string>(IPC.GetMainBranch, { projectRoot: p.path }));
+        const ignoredEntries = await invoke<GitIgnoredEntry[]>(IPC.GetGitignoredDirs, {
+          projectRoot: p.path,
+        });
+        symlinkDirs = ignoredEntries.filter((entry) => entry.isDefault).map((entry) => entry.name);
+      }
+      await createTask({
+        name: 'Jira Implementer',
+        agentDef,
+        projectId: p.id,
+        gitIsolation: isGit ? 'worktree' : 'none',
+        baseBranch,
+        symlinkDirs,
+        initialPrompt: IMPLEMENTER_LOOP_PROMPT(
+          p.jiraProjectKey.trim(),
+          jiraDefaultReviewers().trim(),
+        ),
+      });
     } catch (err) {
-      setCheckNowError(err instanceof Error ? err.message : String(err));
+      setStartError(err instanceof Error ? err.message : String(err));
     } finally {
-      setCheckingNow(false);
+      setStarting(null);
+    }
+  }
+
+  async function startDeployer() {
+    const p = props.project;
+    if (!p || !p.jiraProjectKey?.trim()) return;
+    setStartError(null);
+    setStarting('deployer');
+    try {
+      const agentDef =
+        store.availableAgents.find((a) => a.id === store.lastAgentId) ?? store.availableAgents[0];
+      if (!agentDef) throw new Error('No agent configured');
+      const isGit = p.isGitRepo !== false;
+      let baseBranch = '';
+      let symlinkDirs: string[] = [];
+      if (isGit) {
+        baseBranch =
+          p.defaultBaseBranch ?? (await invoke<string>(IPC.GetMainBranch, { projectRoot: p.path }));
+        const ignoredEntries = await invoke<GitIgnoredEntry[]>(IPC.GetGitignoredDirs, {
+          projectRoot: p.path,
+        });
+        symlinkDirs = ignoredEntries.filter((entry) => entry.isDefault).map((entry) => entry.name);
+      }
+      await createTask({
+        name: 'Jira Deployer',
+        agentDef,
+        projectId: p.id,
+        gitIsolation: isGit ? 'worktree' : 'none',
+        baseBranch,
+        symlinkDirs,
+        initialPrompt: DEPLOYER_LOOP_PROMPT(p.jiraProjectKey.trim()),
+      });
+    } catch (err) {
+      setStartError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStarting(null);
     }
   }
 
@@ -112,10 +183,7 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
       defaultGitIsolation: defaultGitIsolation(),
       defaultBaseBranch: defaultBaseBranch() || undefined,
       coverageReportPath: coverageReportPath().trim() || undefined,
-      jiraWatchEnabled: jiraWatchEnabled(),
       jiraProjectKey: jiraProjectKey().trim() || undefined,
-      jiraTriggerLabel: jiraTriggerLabel().trim() || undefined,
-      jiraCompletedLabel: jiraCompletedLabel().trim() || undefined,
       jiraDefaultReviewers: jiraDefaultReviewers().trim() || undefined,
       terminalBookmarks: bookmarks(),
     });
@@ -457,174 +525,117 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
               </div>
             </div>
 
-            {/* Jira board watcher */}
+            {/* Jira Implementer / Deployer loop tasks */}
             <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
-              <label
-                style={{
-                  display: 'flex',
-                  'align-items': 'center',
-                  gap: '8px',
-                  cursor: 'pointer',
-                  'font-size': '14px',
-                  color: theme.fg,
-                }}
-              >
+              <div style={{ ...sectionLabelStyle, 'font-weight': '600' }}>Jira automation</div>
+              <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
+                <label style={sectionLabelStyle}>Jira project key</label>
                 <input
-                  type="checkbox"
-                  checked={jiraWatchEnabled()}
-                  onChange={(e) => setJiraWatchEnabled(e.currentTarget.checked)}
-                  style={{ cursor: 'pointer' }}
-                />
-                Watch Jira board for labeled tickets
-              </label>
-              <Show when={jiraWatchEnabled()}>
-                {/* Watcher availability, pushed from the main process. The
-                    toggle can be on while the watcher has disabled itself
-                    (claude CLI missing / not authenticated). */}
-                <div
+                  class="input-field"
+                  type="text"
+                  value={jiraProjectKey()}
+                  onInput={(e) => setJiraProjectKey(e.currentTarget.value)}
+                  placeholder="DEV_IRREG"
                   style={{
-                    'font-size': '12px',
-                    color: jiraWatcherStatus().disabled ? theme.warning : theme.fgSubtle,
-                    padding: '0 2px',
+                    background: theme.bgInput,
+                    border: `1px solid ${theme.border}`,
+                    'border-radius': '8px',
+                    padding: '10px 14px',
+                    color: theme.fg,
+                    'font-size': '14px',
+                    'font-family': "'JetBrains Mono', monospace",
+                    outline: 'none',
+                  }}
+                />
+              </div>
+              <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
+                <label style={sectionLabelStyle}>
+                  Default reviewers{' '}
+                  <span style={{ opacity: '0.5', 'text-transform': 'none' }}>
+                    (e.g. @avnair @spummer)
+                  </span>
+                </label>
+                <input
+                  class="input-field"
+                  type="text"
+                  value={jiraDefaultReviewers()}
+                  onInput={(e) => setJiraDefaultReviewers(e.currentTarget.value)}
+                  placeholder="@avnair @spummer"
+                  style={{
+                    background: theme.bgInput,
+                    border: `1px solid ${theme.border}`,
+                    'border-radius': '8px',
+                    padding: '10px 14px',
+                    color: theme.fg,
+                    'font-size': '14px',
+                    'font-family': "'JetBrains Mono', monospace",
+                    outline: 'none',
+                  }}
+                />
+                <div style={{ 'font-size': '12px', color: theme.fgSubtle, padding: '2px 2px 0' }}>
+                  Baked into the Implementer's /loop prompt as myl3's reviewers argument.
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  disabled={!jiraProjectKey().trim() || implementerRunning() || starting() !== null}
+                  onClick={startImplementer}
+                  style={{
+                    padding: '6px 14px',
+                    background: theme.accent,
+                    border: 'none',
+                    'border-radius': '8px',
+                    color: theme.accentText,
+                    cursor:
+                      !jiraProjectKey().trim() || implementerRunning() || starting() !== null
+                        ? 'not-allowed'
+                        : 'pointer',
+                    'font-size': '13px',
+                    'font-weight': '600',
+                    opacity:
+                      !jiraProjectKey().trim() || implementerRunning() || starting() !== null
+                        ? '0.5'
+                        : '1',
                   }}
                 >
-                  Status: {jiraWatcherStatusLabel()}
-                </div>
-                <div style={{ display: 'flex', 'align-items': 'center', gap: '8px' }}>
-                  <button
-                    type="button"
-                    disabled={checkingNow()}
-                    onClick={handleTriggerNow}
-                    style={{
-                      padding: '6px 14px',
-                      background: theme.accent,
-                      border: 'none',
-                      'border-radius': '8px',
-                      color: theme.accentText,
-                      cursor: checkingNow() ? 'not-allowed' : 'pointer',
-                      'font-size': '13px',
-                      'font-weight': '600',
-                      opacity: checkingNow() ? '0.5' : '1',
-                    }}
-                  >
-                    {checkingNow() ? 'Checking…' : 'Check Jira now'}
-                  </button>
-                  <Show when={checkNowResult()}>
-                    <div style={{ 'font-size': '12px', color: theme.fgSubtle }}>
-                      {checkNowResult()}
-                    </div>
-                  </Show>
-                  <Show when={checkNowError()}>
-                    <div style={{ 'font-size': '12px', color: theme.warning }}>
-                      {checkNowError()}
-                    </div>
-                  </Show>
-                </div>
-                <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
-                  <label style={sectionLabelStyle}>Jira project key</label>
-                  <input
-                    class="input-field"
-                    type="text"
-                    value={jiraProjectKey()}
-                    onInput={(e) => setJiraProjectKey(e.currentTarget.value)}
-                    placeholder="DEV_IRREG"
-                    style={{
-                      background: theme.bgInput,
-                      border: `1px solid ${theme.border}`,
-                      'border-radius': '8px',
-                      padding: '10px 14px',
-                      color: theme.fg,
-                      'font-size': '14px',
-                      'font-family': "'JetBrains Mono', monospace",
-                      outline: 'none',
-                    }}
-                  />
-                </div>
-                <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
-                  <label style={sectionLabelStyle}>
-                    Trigger label{' '}
-                    <span style={{ opacity: '0.5', 'text-transform': 'none' }}>
-                      (blank = REG_AUTOMATED)
-                    </span>
-                  </label>
-                  <input
-                    class="input-field"
-                    type="text"
-                    value={jiraTriggerLabel()}
-                    onInput={(e) => setJiraTriggerLabel(e.currentTarget.value)}
-                    placeholder="REG_AUTOMATED"
-                    style={{
-                      background: theme.bgInput,
-                      border: `1px solid ${theme.border}`,
-                      'border-radius': '8px',
-                      padding: '10px 14px',
-                      color: theme.fg,
-                      'font-size': '14px',
-                      'font-family': "'JetBrains Mono', monospace",
-                      outline: 'none',
-                    }}
-                  />
-                </div>
-                <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
-                  <label style={sectionLabelStyle}>
-                    Completed label{' '}
-                    <span style={{ opacity: '0.5', 'text-transform': 'none' }}>
-                      (blank = REG_AUTOMATED_SUCC)
-                    </span>
-                  </label>
-                  <input
-                    class="input-field"
-                    type="text"
-                    value={jiraCompletedLabel()}
-                    onInput={(e) => setJiraCompletedLabel(e.currentTarget.value)}
-                    placeholder="REG_AUTOMATED_SUCC"
-                    style={{
-                      background: theme.bgInput,
-                      border: `1px solid ${theme.border}`,
-                      'border-radius': '8px',
-                      padding: '10px 14px',
-                      color: theme.fg,
-                      'font-size': '14px',
-                      'font-family': "'JetBrains Mono', monospace",
-                      outline: 'none',
-                    }}
-                  />
-                </div>
-                <div style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
-                  <label style={sectionLabelStyle}>
-                    Default reviewers{' '}
-                    <span style={{ opacity: '0.5', 'text-transform': 'none' }}>
-                      (e.g. @avnair @spummer)
-                    </span>
-                  </label>
-                  <input
-                    class="input-field"
-                    type="text"
-                    value={jiraDefaultReviewers()}
-                    onInput={(e) => setJiraDefaultReviewers(e.currentTarget.value)}
-                    placeholder="@avnair @spummer"
-                    style={{
-                      background: theme.bgInput,
-                      border: `1px solid ${theme.border}`,
-                      'border-radius': '8px',
-                      padding: '10px 14px',
-                      color: theme.fg,
-                      'font-size': '14px',
-                      'font-family': "'JetBrains Mono', monospace",
-                      outline: 'none',
-                    }}
-                  />
-                  <div
-                    style={{
-                      'font-size': '12px',
-                      color: theme.fgSubtle,
-                      padding: '2px 2px 0',
-                    }}
-                  >
-                    Used as the reviewers argument for every ticket the Implementer queue picks up
-                    automatically (e.g. passed to <code>/myl3</code>).
-                  </div>
-                </div>
+                  {implementerRunning()
+                    ? 'Implementer running'
+                    : starting() === 'implementer'
+                      ? 'Starting…'
+                      : 'Start Jira Implementer'}
+                </button>
+                <button
+                  type="button"
+                  disabled={!jiraProjectKey().trim() || deployerRunning() || starting() !== null}
+                  onClick={startDeployer}
+                  style={{
+                    padding: '6px 14px',
+                    background: theme.accent,
+                    border: 'none',
+                    'border-radius': '8px',
+                    color: theme.accentText,
+                    cursor:
+                      !jiraProjectKey().trim() || deployerRunning() || starting() !== null
+                        ? 'not-allowed'
+                        : 'pointer',
+                    'font-size': '13px',
+                    'font-weight': '600',
+                    opacity:
+                      !jiraProjectKey().trim() || deployerRunning() || starting() !== null
+                        ? '0.5'
+                        : '1',
+                  }}
+                >
+                  {deployerRunning()
+                    ? 'Deployer running'
+                    : starting() === 'deployer'
+                      ? 'Starting…'
+                      : 'Start Jira Deployer'}
+                </button>
+              </div>
+              <Show when={startError()}>
+                <div style={{ 'font-size': '12px', color: theme.warning }}>{startError()}</div>
               </Show>
             </div>
 
