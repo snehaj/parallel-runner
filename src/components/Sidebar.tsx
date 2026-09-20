@@ -36,7 +36,6 @@ import {
   isCoordinatedChild,
 } from '../store/sidebar-order';
 import { computeNeedsInputTasks, jumpToWaitingTask } from '../store/sidebar-attention';
-import { jiraWatcherStatus, jiraWatcherStatusLabel } from '../store/jira-watcher';
 import { ConnectPhoneModal } from './ConnectPhoneModal';
 import { RemoveProjectConfirm } from './RemoveProjectConfirm';
 import { EditProjectDialog } from './EditProjectDialog';
@@ -821,28 +820,6 @@ export function Sidebar() {
                           'flex-shrink': '0',
                         }}
                       />
-                      <Show when={project.jiraWatchEnabled}>
-                        {/* Greyed out when the main-process watcher has
-                            disabled itself (claude CLI missing / not
-                            authenticated) — the toggle is on but nothing is
-                            actually polling. */}
-                        <div
-                          title={
-                            jiraWatcherStatus().disabled
-                              ? `Jira board watcher — ${jiraWatcherStatusLabel()}`
-                              : 'Watching Jira board'
-                          }
-                          style={{
-                            'font-size': sf(10),
-                            color: theme.fgSubtle,
-                            'flex-shrink': '0',
-                            opacity: jiraWatcherStatus().disabled ? '0.35' : '1',
-                            filter: jiraWatcherStatus().disabled ? 'grayscale(1)' : 'none',
-                          }}
-                        >
-                          🔖
-                        </div>
-                      </Show>
                       <div style={{ flex: '1', 'min-width': '0', overflow: 'hidden' }}>
                         <div
                           style={{
