@@ -110,6 +110,15 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
           p.jiraProjectKey.trim(),
           jiraDefaultReviewers().trim(),
         ),
+        // This task runs unattended -- nobody is watching to answer the
+        // /loop skill's own "Do you want to proceed?" confirmation prompt.
+        // Without skip permissions, that prompt sits forever on the very
+        // first cycle and the loop never starts (reproduced live: the task
+        // opens, sends /loop, and then just waits at that gate). Only set
+        // when the agent actually supports it -- same guard NewTaskDialog
+        // uses (agentDef.skip_permissions_args is empty for agents with no
+        // such flag, e.g. a plain shell).
+        skipPermissions: !!agentDef.skip_permissions_args?.length,
       });
     } catch (err) {
       setStartError(err instanceof Error ? err.message : String(err));
@@ -146,6 +155,10 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
         baseBranch,
         symlinkDirs,
         initialPrompt: DEPLOYER_LOOP_PROMPT(p.jiraProjectKey.trim()),
+        // Same reasoning as startImplementer -- this task runs unattended,
+        // so the /loop skill's own confirmation prompt must be
+        // pre-approved or the loop never gets past its first cycle.
+        skipPermissions: !!agentDef.skip_permissions_args?.length,
       });
     } catch (err) {
       setStartError(err instanceof Error ? err.message : String(err));
