@@ -39,6 +39,19 @@ const TRUST_PATTERNS: RegExp[] = [
 const TRUST_EXCLUSION_KEYWORDS =
   /\b(delet|remov|credential|secret|password|key|token|destro|format|drop)/i;
 
+// Claude Code's own one-time "Bypass Permissions mode" safety warning, shown
+// the first time --dangerously-skip-permissions is used in a given worktree
+// -- distinct from the folder-trust dialog above (different fixed text, and
+// critically a DIFFERENT default selection: "No, exit" is focused, not
+// "Yes, I accept"). A bare '\r' (correct for the trust dialog) would select
+// "No, exit" here and kill the process -- reproduced live: a Jira
+// Implementer/Deployer loop task sent this text, got no answer, and its
+// process exited. Recognized and handled separately from TRUST_PATTERNS/
+// looksLikeTrustDialog because it needs a different response sequence
+// (move the selection down, then confirm), not because the "is this an
+// autonomous, skipPermissions-forced task" gating differs.
+const BYPASS_PERMISSIONS_WARNING_PATTERN = /bypass permissions mode/i;
+
 // --- Consolidated per-agent tracking state ---
 // Groups all per-agent Maps into one to prevent cleanup leaks.
 interface AgentTrackingState {
@@ -441,6 +454,13 @@ function looksLikeTrustDialog(tail: string): boolean {
   return lines.some((line) => TRUST_PATTERNS.some((re) => re.test(line.trimEnd())));
 }
 
+/** True when recent output contains Claude Code's one-time "Bypass Permissions
+ *  mode" safety warning. See BYPASS_PERMISSIONS_WARNING_PATTERN for why this
+ *  is handled separately from looksLikeTrustDialog. */
+function looksLikeBypassPermissionsWarning(tail: string): boolean {
+  return BYPASS_PERMISSIONS_WARNING_PATTERN.test(tail);
+}
+
 // --- Agent question tracking ---
 // Reactive set of agent IDs that currently have a question/dialog in their terminal.
 const [questionAgents, setQuestionAgents] = createSignal<Set<string>>(new Set());
@@ -627,13 +647,45 @@ export function markAgentSpawned(agentId: string): void {
 }
 
 /** True when the task owning this agent should always auto-handle trust dialogs,
- *  regardless of the autoTrustFolders setting. Coordinator sub-tasks with
- *  skipPermissions run autonomously — trust dialogs must never block them. */
+ *  regardless of the autoTrustFolders setting. Any task with skipPermissions
+ *  runs autonomously — trust dialogs must never block it, whether it's a
+ *  coordinator sub-task or a plain task (e.g. the Jira Implementer/Deployer
+ *  loop-task buttons, which are not coordinator sub-tasks but are just as
+ *  unattended). Previously required coordinatedBy too, which wrongly left
+ *  plain skipPermissions tasks unforced. */
 function isAutoTrustForced(agentId: string): boolean {
   const taskId = agentStates.get(agentId)?.taskId;
   if (!taskId) return false;
   const task = store.tasks[taskId];
-  return !!(task?.coordinatedBy && task?.skipPermissions);
+  return !!task?.skipPermissions;
+}
+
+/** Determines whether `rawTail` is a dialog tryAutoTrust should answer, and if
+ *  so, which raw PTY bytes answer it. Returns null when nothing recognized
+ *  dialog is present, or when a recognized one is gated out (exclusion
+ *  keywords for the trust dialog; not a forced/skipPermissions task for the
+ *  bypass-permissions warning). Two dialogs, two different responses:
+ *  - Folder-trust dialog: bare '\r' -- its default selection is already
+ *    "Yes"/trust.
+ *  - Bypass-permissions warning: Down arrow then '\r' -- its default
+ *    selection is "No, exit", so a bare '\r' would decline and kill the
+ *    process (reproduced live). Gated on isAutoTrustForced alone (NOT
+ *    store.autoTrustFolders) -- this is a materially higher-stakes
+ *    confirmation than folder trust, and a user's global "auto-trust
+ *    folders" toggle should never implicitly cover it. In practice this
+ *    warning only ever appears for a task that was launched with
+ *    --dangerously-skip-permissions in the first place, i.e. skipPermissions
+ *    is already true, so this gate is not expected to ever block a real
+ *    occurrence -- it exists to keep the two dialogs' authorization scopes
+ *    explicit and independent rather than accidentally coupled. */
+function autoTrustResponseFor(agentId: string, rawTail: string): string | null {
+  if (looksLikeBypassPermissionsWarning(rawTail)) {
+    return isAutoTrustForced(agentId) ? '\x1b[B\r' : null;
+  }
+  if (looksLikeTrustDialog(rawTail) && !TRUST_EXCLUSION_KEYWORDS.test(stripAnsi(rawTail))) {
+    return '\r';
+  }
+  return null;
 }
 
 /** Try to auto-accept trust/permission dialogs for any agent (active or background).
@@ -645,15 +697,13 @@ function tryAutoTrust(agentId: string, rawTail: string): boolean {
   if (isAutoTrustPending(agentId)) {
     return false;
   }
-  if (!looksLikeTrustDialog(rawTail)) {
-    return false;
-  }
-  if (TRUST_EXCLUSION_KEYWORDS.test(stripAnsi(rawTail))) {
+  const response = autoTrustResponseFor(agentId, rawTail);
+  if (response === null) {
     return false;
   }
 
   const state = getAgentState(agentId);
-  // Short delay to let the TUI finish rendering before sending Enter.
+  // Short delay to let the TUI finish rendering before sending the response.
   state.autoTrustTimer = setTimeout(() => {
     state.autoTrustTimer = undefined;
     // Clear stale trust-dialog content (including ❯ selection cursor) so
@@ -667,7 +717,7 @@ function tryAutoTrust(agentId: string, rawTail: string): boolean {
     // Start the settling period — blocks auto-send for POST_AUTO_TRUST_SETTLE_MS
     // to give slow-starting agents (e.g. Claude Code) time to fully initialize.
     state.autoTrustAcceptedAt = Date.now();
-    invoke(IPC.WriteToAgent, { agentId, data: '\r' }).catch((err) => {
+    invoke(IPC.WriteToAgent, { agentId, data: response }).catch((err) => {
       logWarn('tasks.autoTrust', 'WriteToAgent failed during auto-trust accept', { err });
     });
     // If questionJustActivated raced ahead and set human_control before
@@ -703,15 +753,16 @@ function analyzeAgentOutput(agentId: string): void {
   const rawTail = state.outputTailBuffer;
   let hasQuestion = looksLikeQuestion(rawTail);
 
-  // Suppress question state for trust dialogs when auto-trust is enabled —
-  // whether we just scheduled auto-trust or it's already pending/in cooldown.
-  // Without this, subsequent analysis calls re-detect the stale dialog text in
-  // the tail buffer and set hasQuestion=true, which disables the prompt
-  // textarea and steals focus to the terminal.
-  // Also force this for coordinator sub-tasks with skipPermissions — they run
-  // autonomously and trust dialogs must never block them regardless of the setting.
+  // Suppress question state for trust/bypass-permissions dialogs when
+  // auto-trust applies (global setting, or forced for a skipPermissions
+  // task) — whether we just scheduled auto-trust or it's already
+  // pending/in cooldown. Without this, subsequent analysis calls re-detect
+  // the stale dialog text in the tail buffer and set hasQuestion=true,
+  // which disables the prompt textarea and steals focus to the terminal.
+  // Also force this for skipPermissions tasks — they run autonomously and
+  // these dialogs must never block them regardless of the setting.
   if (hasQuestion && (store.autoTrustFolders || isAutoTrustForced(agentId))) {
-    if (looksLikeTrustDialog(rawTail) && !TRUST_EXCLUSION_KEYWORDS.test(stripAnsi(rawTail))) {
+    if (autoTrustResponseFor(agentId, rawTail) !== null) {
       // Auto-trust may not have fired yet if this is the first analysis for
       // an active task that just became visible — trigger it now.
       tryAutoTrust(agentId, rawTail);

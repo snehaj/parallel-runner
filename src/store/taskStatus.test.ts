@@ -569,6 +569,24 @@ describe('isTrustQuestionAutoHandled', () => {
 
     expect(isAgentTrustQuestionAutoHandled('agent-1', 'Do you trust this folder?')).toBe(false);
   });
+
+  it('returns true for a PLAIN (non-coordinator) skipPermissions task -- e.g. the Jira Implementer/Deployer loop-task buttons', () => {
+    // Regression test: isAutoTrustForced used to require coordinatedBy too,
+    // so a plain createTask({ skipPermissions: true }) call (not a
+    // coordinator sub-task) never got forced auto-trust -- reproduced live
+    // when Jira Implementer/Deployer, which are just normal worktree tasks
+    // with skipPermissions set, sat blocked on the "Bypass Permissions mode"
+    // warning with global autoTrustFolders off.
+    setMockTask('task-1', {
+      agentIds: ['agent-1'],
+      skipPermissions: true,
+      // coordinatedBy deliberately omitted -- not a coordinator sub-task.
+    });
+    setMockAgent('agent-1', { status: 'running' });
+    markAgentOutput('agent-1', new TextEncoder().encode('startup'), 'task-1');
+
+    expect(isAgentTrustQuestionAutoHandled('agent-1', 'Do you trust this folder?')).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1116,6 +1134,85 @@ describe('coordinator auto-trust', () => {
       taskId: 'task-1',
       controlledBy: 'coordinator',
     });
+  });
+});
+
+describe('bypass-permissions-mode warning auto-accept', () => {
+  // Regression test for a live incident: the Jira Implementer/Deployer
+  // loop-task buttons create a plain (non-coordinator) skipPermissions
+  // task, whose first /loop invocation triggers the loop skill's own
+  // confirmation prompt AND, separately, Claude Code's one-time "Bypass
+  // Permissions mode" safety warning. Both dialogs sat unanswered because
+  // (a) isAutoTrustForced required coordinatedBy, which this task doesn't
+  // have, and (b) even once forced, a bare '\r' (correct for the folder-
+  // trust dialog) would hit this warning's default "No, exit" selection
+  // and kill the process -- reproduced live via "Process exited (1)".
+  // Includes "Do you want to proceed?" -- the actual line that makes
+  // looksLikeQuestion notice this dialog in the first place (matched via
+  // QUESTION_PATTERNS' /Do you want to/i), matching the real dialog text
+  // seen live. Without it, hasQuestion never becomes true and the whole
+  // auto-trust branch in analyzeAgentOutput is never reached -- this is
+  // NOT optional dressing on the fixture, it's load-bearing for the test.
+  const BYPASS_WARNING_TEXT =
+    'WARNING: Claude Code running in Bypass Permissions mode\n\n' +
+    'In Bypass Permissions mode, Claude Code will not ask for your approval ' +
+    'before running potentially dangerous commands.\n\n' +
+    'Do you want to proceed?\n' +
+    'No, exit\nYes, I accept\n\nEnter to confirm · Esc to cancel';
+
+  it('sends Down-arrow then Enter (not a bare Enter) for a forced skipPermissions task', () => {
+    setMockTask('task-1', {
+      agentIds: ['agent-1'],
+      skipPermissions: true,
+      // coordinatedBy deliberately omitted -- matches the Jira loop-task
+      // buttons, which are plain tasks, not coordinator sub-tasks.
+    });
+    setMockAgent('agent-1', { status: 'running' });
+
+    markAgentOutput('agent-1', new TextEncoder().encode(BYPASS_WARNING_TEXT), 'task-1');
+    vi.advanceTimersByTime(50);
+
+    expect(invoke).toHaveBeenCalledWith('write_to_agent', {
+      agentId: 'agent-1',
+      data: '\x1b[B\r',
+    });
+  });
+
+  it('does NOT answer with a bare Enter, which would select the default "No, exit"', () => {
+    setMockTask('task-1', { agentIds: ['agent-1'], skipPermissions: true });
+    setMockAgent('agent-1', { status: 'running' });
+
+    markAgentOutput('agent-1', new TextEncoder().encode(BYPASS_WARNING_TEXT), 'task-1');
+    vi.advanceTimersByTime(50);
+
+    expect(invoke).not.toHaveBeenCalledWith('write_to_agent', { agentId: 'agent-1', data: '\r' });
+  });
+
+  it('does not answer when the task is not forced and global auto-trust is off', () => {
+    setMockTask('task-1', { agentIds: ['agent-1'], skipPermissions: false });
+    setMockAgent('agent-1', { status: 'running' });
+
+    markAgentOutput('agent-1', new TextEncoder().encode(BYPASS_WARNING_TEXT), 'task-1');
+    vi.advanceTimersByTime(50);
+
+    expect(invoke).not.toHaveBeenCalledWith(
+      'write_to_agent',
+      expect.objectContaining({ agentId: 'agent-1' }),
+    );
+  });
+
+  it('does NOT auto-answer merely because global autoTrustFolders is on -- this warning is forced-only, not covered by the folder-trust setting', () => {
+    mockAutoTrustFolders = true;
+    setMockTask('task-1', { agentIds: ['agent-1'], skipPermissions: false });
+    setMockAgent('agent-1', { status: 'running' });
+
+    markAgentOutput('agent-1', new TextEncoder().encode(BYPASS_WARNING_TEXT), 'task-1');
+    vi.advanceTimersByTime(50);
+
+    expect(invoke).not.toHaveBeenCalledWith(
+      'write_to_agent',
+      expect.objectContaining({ agentId: 'agent-1' }),
+    );
   });
 });
 
