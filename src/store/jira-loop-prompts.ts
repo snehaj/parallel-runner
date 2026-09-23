@@ -44,6 +44,24 @@ reports failure, leave the ticket's state as /pipeline-deploy left it; it will b
 retried automatically next cycle.`;
 }
 
+export function REVIEW_RESPONDER_LOOP_PROMPT(projectKey: string): string {
+  return `/loop 3m
+
+Check Jira for ${projectKey} tickets with status = "In Review", labeled REG_AUTOMATED_SUCC,
+assigned to the current user. JQL:
+
+  project = ${projectKey} AND assignee = currentUser() AND status = "In Review"
+  AND labels = "REG_AUTOMATED_SUCC" ORDER BY updated ASC
+
+If none found: nothing to do this cycle.
+
+If one or more found: run /pipeline-review-respond. It finds and acts on one eligible ticket
+itself (same JQL convention) -- you don't need to pass it a specific ticket key. If it reports
+failure or leaves the ticket blocked (unresolved threads / not yet approved), leave the
+ticket's state as /pipeline-review-respond left it; it will be retried automatically next
+cycle.`;
+}
+
 /** True when a task named `name`, belonging to `projectId`, already exists in
  *  `tasks` (per `taskOrder`). Same reuse check `ensurePersistentTask` used to
  *  do inline before it was removed -- used here to disable a loop-task

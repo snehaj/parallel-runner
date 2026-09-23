@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { IMPLEMENTER_LOOP_PROMPT, DEPLOYER_LOOP_PROMPT, hasTaskNamed } from './jira-loop-prompts';
+import {
+  IMPLEMENTER_LOOP_PROMPT,
+  DEPLOYER_LOOP_PROMPT,
+  REVIEW_RESPONDER_LOOP_PROMPT,
+  hasTaskNamed,
+} from './jira-loop-prompts';
 
 describe('IMPLEMENTER_LOOP_PROMPT', () => {
   it('embeds the project key in the JQL and the reviewers in the /myl3 call', () => {
@@ -28,6 +33,18 @@ describe('DEPLOYER_LOOP_PROMPT', () => {
     );
     expect(prompt).not.toContain('REG_AUTOMATED');
     expect(prompt).toContain('run /pipeline-deploy');
+  });
+});
+
+describe('REVIEW_RESPONDER_LOOP_PROMPT', () => {
+  it('embeds the project key in the JQL and defers to /pipeline-review-respond', () => {
+    const prompt = REVIEW_RESPONDER_LOOP_PROMPT('DEV_IRREG');
+    expect(prompt).toContain('/loop 3m');
+    expect(prompt).toContain(
+      'project = DEV_IRREG AND assignee = currentUser() AND status = "In Review"',
+    );
+    expect(prompt).toContain('AND labels = "REG_AUTOMATED_SUCC" ORDER BY updated ASC');
+    expect(prompt).toContain('run /pipeline-review-respond');
   });
 });
 
