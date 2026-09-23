@@ -15,6 +15,7 @@ import { store } from '../store/core';
 import {
   IMPLEMENTER_LOOP_PROMPT,
   DEPLOYER_LOOP_PROMPT,
+  REVIEW_RESPONDER_LOOP_PROMPT,
   hasTaskNamed,
 } from '../store/jira-loop-prompts';
 import type { GitIgnoredEntry } from '../ipc/types';
@@ -64,7 +65,9 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
     requestAnimationFrame(() => nameRef?.focus());
   });
 
-  const [starting, setStarting] = createSignal<'implementer' | 'deployer' | null>(null);
+  const [starting, setStarting] = createSignal<
+    'implementer' | 'deployer' | 'reviewResponder' | null
+  >(null);
   const [startError, setStartError] = createSignal<string | null>(null);
 
   function implementerRunning(): boolean {
@@ -77,6 +80,12 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
     const p = props.project;
     if (!p) return false;
     return hasTaskNamed(store.taskOrder, store.tasks, p.id, 'Jira Deployer');
+  }
+
+  function reviewResponderRunning(): boolean {
+    const p = props.project;
+    if (!p) return false;
+    return hasTaskNamed(store.taskOrder, store.tasks, p.id, 'Jira Review Responder');
   }
 
   async function startImplementer() {
@@ -155,6 +164,46 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
         baseBranch,
         symlinkDirs,
         initialPrompt: DEPLOYER_LOOP_PROMPT(p.jiraProjectKey.trim()),
+        // Same reasoning as startImplementer -- this task runs unattended,
+        // so the /loop skill's own confirmation prompt must be
+        // pre-approved or the loop never gets past its first cycle.
+        skipPermissions: !!agentDef.skip_permissions_args?.length,
+      });
+    } catch (err) {
+      setStartError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStarting(null);
+    }
+  }
+
+  async function startReviewResponder() {
+    const p = props.project;
+    if (!p || !p.jiraProjectKey?.trim()) return;
+    setStartError(null);
+    setStarting('reviewResponder');
+    try {
+      const agentDef =
+        store.availableAgents.find((a) => a.id === store.lastAgentId) ?? store.availableAgents[0];
+      if (!agentDef) throw new Error('No agent configured');
+      const isGit = p.isGitRepo !== false;
+      let baseBranch = '';
+      let symlinkDirs: string[] = [];
+      if (isGit) {
+        baseBranch =
+          p.defaultBaseBranch ?? (await invoke<string>(IPC.GetMainBranch, { projectRoot: p.path }));
+        const ignoredEntries = await invoke<GitIgnoredEntry[]>(IPC.GetGitignoredDirs, {
+          projectRoot: p.path,
+        });
+        symlinkDirs = ignoredEntries.filter((entry) => entry.isDefault).map((entry) => entry.name);
+      }
+      await createTask({
+        name: 'Jira Review Responder',
+        agentDef,
+        projectId: p.id,
+        gitIsolation: isGit ? 'worktree' : 'none',
+        baseBranch,
+        symlinkDirs,
+        initialPrompt: REVIEW_RESPONDER_LOOP_PROMPT(p.jiraProjectKey.trim()),
         // Same reasoning as startImplementer -- this task runs unattended,
         // so the /loop skill's own confirmation prompt must be
         // pre-approved or the loop never gets past its first cycle.
@@ -589,7 +638,7 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
                   Baked into the Implementer's /loop prompt as myl3's reviewers argument.
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
+              <div style={{ display: 'flex', gap: '8px', 'flex-wrap': 'wrap' }}>
                 <button
                   type="button"
                   disabled={!jiraProjectKey().trim() || implementerRunning() || starting() !== null}
@@ -645,6 +694,36 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
                     : starting() === 'deployer'
                       ? 'Starting…'
                       : 'Start Jira Deployer'}
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    !jiraProjectKey().trim() || reviewResponderRunning() || starting() !== null
+                  }
+                  onClick={startReviewResponder}
+                  style={{
+                    padding: '6px 14px',
+                    background: theme.accent,
+                    border: 'none',
+                    'border-radius': '8px',
+                    color: theme.accentText,
+                    cursor:
+                      !jiraProjectKey().trim() || reviewResponderRunning() || starting() !== null
+                        ? 'not-allowed'
+                        : 'pointer',
+                    'font-size': '13px',
+                    'font-weight': '600',
+                    opacity:
+                      !jiraProjectKey().trim() || reviewResponderRunning() || starting() !== null
+                        ? '0.5'
+                        : '1',
+                  }}
+                >
+                  {reviewResponderRunning()
+                    ? 'Review Responder running'
+                    : starting() === 'reviewResponder'
+                      ? 'Starting…'
+                      : 'Start Jira Review Responder'}
                 </button>
               </div>
               <Show when={startError()}>
