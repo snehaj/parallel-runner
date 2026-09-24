@@ -664,7 +664,16 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
                       !jiraProjectKey().trim() || implementerRunning() || starting() !== null
                     }
                     onChange={(e) => {
-                      if (e.currentTarget.checked) startImplementer();
+                      const shouldStart = e.currentTarget.checked;
+                      // A native checkbox flips its own DOM `checked` on click
+                      // regardless of what happens next. If startImplementer()
+                      // below early-returns without ever setting `starting`,
+                      // the reactive `checked` expression above never re-runs
+                      // and the box would stay stuck checked. Force it back to
+                      // the real derived state immediately; startImplementer()
+                      // takes over from there if it actually proceeds.
+                      e.currentTarget.checked = implementerRunning() || starting() === 'implementer';
+                      if (shouldStart) startImplementer();
                     }}
                     style={{ cursor: 'pointer' }}
                   />
@@ -698,7 +707,14 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
                       !jiraProjectKey().trim() || reviewResponderRunning() || starting() !== null
                     }
                     onChange={(e) => {
-                      if (e.currentTarget.checked) startReviewResponder();
+                      const shouldStart = e.currentTarget.checked;
+                      // See the Implementer checkbox's onChange for why this
+                      // resync is needed: a native checkbox flips its own DOM
+                      // `checked` on click even if startReviewResponder() below
+                      // early-returns without setting `starting`.
+                      e.currentTarget.checked =
+                        reviewResponderRunning() || starting() === 'reviewResponder';
+                      if (shouldStart) startReviewResponder();
                     }}
                     style={{ cursor: 'pointer' }}
                   />
@@ -730,7 +746,13 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
                     checked={deployerRunning() || starting() === 'deployer'}
                     disabled={!jiraProjectKey().trim() || deployerRunning() || starting() !== null}
                     onChange={(e) => {
-                      if (e.currentTarget.checked) startDeployer();
+                      const shouldStart = e.currentTarget.checked;
+                      // See the Implementer checkbox's onChange for why this
+                      // resync is needed: a native checkbox flips its own DOM
+                      // `checked` on click even if startDeployer() below
+                      // early-returns without setting `starting`.
+                      e.currentTarget.checked = deployerRunning() || starting() === 'deployer';
+                      if (shouldStart) startDeployer();
                     }}
                     style={{ cursor: 'pointer' }}
                   />
