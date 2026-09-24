@@ -638,93 +638,130 @@ export function EditProjectDialog(props: EditProjectDialogProps) {
                   Baked into the Implementer's /loop prompt as myl3's reviewers argument.
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: '8px', 'flex-wrap': 'wrap' }}>
-                <button
-                  type="button"
-                  disabled={!jiraProjectKey().trim() || implementerRunning() || starting() !== null}
-                  onClick={startImplementer}
+              <label style={sectionLabelStyle}>Start Jira Observer</label>
+              <div style={{ display: 'flex', 'flex-direction': 'column', gap: '6px' }}>
+                <label
                   style={{
-                    padding: '6px 14px',
-                    background: theme.accent,
-                    border: 'none',
-                    'border-radius': '8px',
-                    color: theme.accentText,
+                    display: 'flex',
+                    'align-items': 'center',
+                    gap: '8px',
                     cursor:
                       !jiraProjectKey().trim() || implementerRunning() || starting() !== null
                         ? 'not-allowed'
                         : 'pointer',
-                    'font-size': '13px',
-                    'font-weight': '600',
+                    'font-size': '14px',
+                    color: theme.fg,
                     opacity:
                       !jiraProjectKey().trim() || implementerRunning() || starting() !== null
                         ? '0.5'
                         : '1',
                   }}
                 >
+                  <input
+                    type="checkbox"
+                    checked={implementerRunning() || starting() === 'implementer'}
+                    disabled={
+                      !jiraProjectKey().trim() || implementerRunning() || starting() !== null
+                    }
+                    onChange={(e) => {
+                      const shouldStart = e.currentTarget.checked;
+                      // A native checkbox flips its own DOM `checked` on click
+                      // regardless of what happens next. If startImplementer()
+                      // below early-returns without ever setting `starting`,
+                      // the reactive `checked` expression above never re-runs
+                      // and the box would stay stuck checked. Force it back to
+                      // the real derived state immediately; startImplementer()
+                      // takes over from there if it actually proceeds.
+                      e.currentTarget.checked = implementerRunning() || starting() === 'implementer';
+                      if (shouldStart) startImplementer();
+                    }}
+                    style={{ cursor: 'pointer' }}
+                  />
                   {implementerRunning()
                     ? 'Implementer running'
                     : starting() === 'implementer'
-                      ? 'Starting…'
-                      : 'Start Jira Implementer'}
-                </button>
-                <button
-                  type="button"
-                  disabled={!jiraProjectKey().trim() || deployerRunning() || starting() !== null}
-                  onClick={startDeployer}
+                      ? 'Starting Implementer…'
+                      : 'Implementer'}
+                </label>
+                <label
                   style={{
-                    padding: '6px 14px',
-                    background: theme.accent,
-                    border: 'none',
-                    'border-radius': '8px',
-                    color: theme.accentText,
-                    cursor:
-                      !jiraProjectKey().trim() || deployerRunning() || starting() !== null
-                        ? 'not-allowed'
-                        : 'pointer',
-                    'font-size': '13px',
-                    'font-weight': '600',
-                    opacity:
-                      !jiraProjectKey().trim() || deployerRunning() || starting() !== null
-                        ? '0.5'
-                        : '1',
-                  }}
-                >
-                  {deployerRunning()
-                    ? 'Deployer running'
-                    : starting() === 'deployer'
-                      ? 'Starting…'
-                      : 'Start Jira Deployer'}
-                </button>
-                <button
-                  type="button"
-                  disabled={
-                    !jiraProjectKey().trim() || reviewResponderRunning() || starting() !== null
-                  }
-                  onClick={startReviewResponder}
-                  style={{
-                    padding: '6px 14px',
-                    background: theme.accent,
-                    border: 'none',
-                    'border-radius': '8px',
-                    color: theme.accentText,
+                    display: 'flex',
+                    'align-items': 'center',
+                    gap: '8px',
                     cursor:
                       !jiraProjectKey().trim() || reviewResponderRunning() || starting() !== null
                         ? 'not-allowed'
                         : 'pointer',
-                    'font-size': '13px',
-                    'font-weight': '600',
+                    'font-size': '14px',
+                    color: theme.fg,
                     opacity:
                       !jiraProjectKey().trim() || reviewResponderRunning() || starting() !== null
                         ? '0.5'
                         : '1',
                   }}
                 >
+                  <input
+                    type="checkbox"
+                    checked={reviewResponderRunning() || starting() === 'reviewResponder'}
+                    disabled={
+                      !jiraProjectKey().trim() || reviewResponderRunning() || starting() !== null
+                    }
+                    onChange={(e) => {
+                      const shouldStart = e.currentTarget.checked;
+                      // See the Implementer checkbox's onChange for why this
+                      // resync is needed: a native checkbox flips its own DOM
+                      // `checked` on click even if startReviewResponder() below
+                      // early-returns without setting `starting`.
+                      e.currentTarget.checked =
+                        reviewResponderRunning() || starting() === 'reviewResponder';
+                      if (shouldStart) startReviewResponder();
+                    }}
+                    style={{ cursor: 'pointer' }}
+                  />
                   {reviewResponderRunning()
                     ? 'Review Responder running'
                     : starting() === 'reviewResponder'
-                      ? 'Starting…'
-                      : 'Start Jira Review Responder'}
-                </button>
+                      ? 'Starting Review Responder…'
+                      : 'Review Responder'}
+                </label>
+                <label
+                  style={{
+                    display: 'flex',
+                    'align-items': 'center',
+                    gap: '8px',
+                    cursor:
+                      !jiraProjectKey().trim() || deployerRunning() || starting() !== null
+                        ? 'not-allowed'
+                        : 'pointer',
+                    'font-size': '14px',
+                    color: theme.fg,
+                    opacity:
+                      !jiraProjectKey().trim() || deployerRunning() || starting() !== null
+                        ? '0.5'
+                        : '1',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={deployerRunning() || starting() === 'deployer'}
+                    disabled={!jiraProjectKey().trim() || deployerRunning() || starting() !== null}
+                    onChange={(e) => {
+                      const shouldStart = e.currentTarget.checked;
+                      // See the Implementer checkbox's onChange for why this
+                      // resync is needed: a native checkbox flips its own DOM
+                      // `checked` on click even if startDeployer() below
+                      // early-returns without setting `starting`.
+                      e.currentTarget.checked = deployerRunning() || starting() === 'deployer';
+                      if (shouldStart) startDeployer();
+                    }}
+                    style={{ cursor: 'pointer' }}
+                  />
+                  {deployerRunning()
+                    ? 'Deployer running'
+                    : starting() === 'deployer'
+                      ? 'Starting Deployer…'
+                      : 'Deployer'}
+                </label>
               </div>
               <Show when={startError()}>
                 <div style={{ 'font-size': '12px', color: theme.warning }}>{startError()}</div>
